@@ -500,6 +500,12 @@ public class JwtPassiveScanCheck implements ScanCheck {
             String headerJson = new String(base64UrlDecode(parts[0]), StandardCharsets.UTF_8);
             JsonObject header = JsonParser.parseString(headerJson).getAsJsonObject();
 
+            // Validate this is actually a JWT — the "alg" field is required by the JWT spec (RFC 7515).
+            // Without it, this is just a base64-encoded JSON object that matched the regex, not a real JWT.
+            if (!header.has("alg")) {
+                return issues;
+            }
+
             // Decode payload
             String payloadJson = new String(base64UrlDecode(parts[1]), StandardCharsets.UTF_8);
             JsonObject payload = JsonParser.parseString(payloadJson).getAsJsonObject();
