@@ -64,7 +64,12 @@ The extension includes both passive and active JWT security checks.
 | **Corrupted signature** | Flips bytes in the signature — confirms if server does real cryptographic verification | High |
 | **Expiry removal** | Removes the `exp` claim from the payload — confirms if server enforces token expiry | High |
 
-The active check runs during Burp's **active scan** on insertion points that contain a JWT.
+### Where do findings appear?
+
+JWT scanner findings show up in Burp's **Dashboard** (Issues tab) and **Target → Issues** — not in the Session Share extension tab. They appear alongside Burp's own findings with the severity and confidence levels shown above.
+
+- **Passive checks** fire automatically as traffic flows through Burp's proxy
+- **Active checks** only run when you trigger an active scan (right-click a request → **Do active scan**)
 
 ## Installation
 
