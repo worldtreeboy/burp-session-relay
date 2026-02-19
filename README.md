@@ -55,11 +55,14 @@ The extension includes both passive and active JWT security checks.
 | **Sensitive data in payload** | JWT payload contains fields like `password`, `ssn`, `credit_card` | High |
 | **HS256 usage** | JWT uses HS256 — informational flag to remind tester to attempt offline secret cracking with `hashcat -m 16500` | Info |
 
-### Active Check (sends requests during active scan)
+### Active Checks (sends requests during active scan)
 
 | Finding | What it does | Severity |
 |---------|-------------|----------|
-| **alg:none bypass** | Takes a JWT from the request, changes the algorithm to `"none"`, strips the signature, sends it, and checks if the server responds 2xx (confirmed bypass) | High |
+| **alg:none bypass** | Changes algorithm to `"none"`, strips signature, sends request — confirms if server accepts unsigned tokens | High |
+| **Empty signature** | Keeps original algorithm but removes the signature — confirms if server validates signatures at all | High |
+| **Corrupted signature** | Flips bytes in the signature — confirms if server does real cryptographic verification | High |
+| **Expiry removal** | Removes the `exp` claim from the payload — confirms if server enforces token expiry | High |
 
 The active check runs during Burp's **active scan** on insertion points that contain a JWT.
 

