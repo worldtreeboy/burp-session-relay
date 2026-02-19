@@ -41,9 +41,11 @@ When a team shares a single user account on a target application, keeping everyo
 | **CSRF** | Configured header name, meta tags in HTML | Configured header on requests |
 | **Custom Headers** | User-defined header names (via `[+]` button) | Matching headers on requests |
 
-## Passive JWT Scanner
+## JWT Scanner
 
-The extension also includes a passive scan check that flags JWT security issues:
+The extension includes both passive and active JWT security checks.
+
+### Passive Checks (read-only traffic analysis)
 
 | Finding | What it detects | Severity |
 |---------|----------------|----------|
@@ -53,7 +55,13 @@ The extension also includes a passive scan check that flags JWT security issues:
 | **Sensitive data in payload** | JWT payload contains fields like `password`, `ssn`, `credit_card` | High |
 | **HS256 usage** | JWT uses HS256 — informational flag to remind tester to attempt offline secret cracking with `hashcat -m 16500` | Info |
 
-All checks are passive (read-only analysis of traffic flowing through Burp). No active requests are sent.
+### Active Check (sends requests during active scan)
+
+| Finding | What it does | Severity |
+|---------|-------------|----------|
+| **alg:none bypass** | Takes a JWT from the request, changes the algorithm to `"none"`, strips the signature, sends it, and checks if the server responds 2xx (confirmed bypass) | High |
+
+The active check runs during Burp's **active scan** on insertion points that contain a JWT.
 
 ## Installation
 
