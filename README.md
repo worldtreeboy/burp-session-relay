@@ -59,10 +59,14 @@ The extension includes both passive and active JWT security checks.
 
 | Finding | What it does | Severity |
 |---------|-------------|----------|
-| **alg:none bypass** | Changes algorithm to `"none"`, strips signature, sends request — confirms if server accepts unsigned tokens | High |
+| **alg:none bypass** | Changes algorithm to `"none"`, strips signature — confirms if server accepts unsigned tokens | High |
 | **Empty signature** | Keeps original algorithm but removes the signature — confirms if server validates signatures at all | High |
 | **Corrupted signature** | Flips bytes in the signature — confirms if server does real cryptographic verification | High |
 | **Expiry removal** | Removes the `exp` claim from the payload — confirms if server enforces token expiry | High |
+| **kid SQL injection** | Injects SQL payloads (`' UNION SELECT 'secret' --`, etc.) into the `kid` header — confirms if server uses kid in raw SQL | High |
+| **kid path traversal** | Injects traversal paths (`../../../dev/null`) into `kid` — confirms if server uses kid as a file path | High |
+| **jku header injection** | Injects a Burp Collaborator URL into the `jku` header — confirms if server fetches external signing keys (SSRF) | High |
+| **nbf bypass** | Sets `nbf` (not before) to 1 year in the future — confirms if server enforces token activation time | High |
 
 ### Where do findings appear?
 
