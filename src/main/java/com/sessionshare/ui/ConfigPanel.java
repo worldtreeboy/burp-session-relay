@@ -6,6 +6,7 @@ import com.sessionshare.follower.TokenPoller;
 import com.sessionshare.leader.TokenCaptureHandler;
 import com.sessionshare.leader.TokenServer;
 import com.sessionshare.model.TokenStore;
+import com.sessionshare.session.SessionManager;
 
 import javax.swing.*;
 import javax.swing.border.TitledBorder;
@@ -19,7 +20,8 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Swing-based UI tab for the Session Share extension.
- * Provides role selection (Leader/Follower) and mode-specific controls.
+ * Provides role selection (Leader/Follower) and mode-specific controls,
+ * plus an always-visible Session Manager panel for auto-refresh.
  */
 public class ConfigPanel extends JPanel {
 
@@ -29,6 +31,7 @@ public class ConfigPanel extends JPanel {
     private final TokenCaptureHandler captureHandler;
     private final TokenPoller tokenPoller;
     private final TokenInjector tokenInjector;
+    private final SessionManager sessionManager;
 
     // Role selection
     private JRadioButton leaderRadio;
@@ -59,24 +62,54 @@ public class ConfigPanel extends JPanel {
     private JLabel followerStatusLabel;
     private JTextArea followerTokenDisplay;
 
+    // Session Manager controls
+    private JCheckBox smEnabledCheckbox;
+    private JTextField smLoginUrlField;
+    private JComboBox<String> smMethodCombo;
+    private JTextField smContentTypeField;
+    private JTextArea smBodyArea;
+    private JTextArea smExtraHeadersArea;
+    private JTextField smBufferField;
+    private JButton smTestButton;
+    private JButton smRefreshNowButton;
+    private JLabel smStatusLabel;
+    private JLabel smJwtExpiryLabel;
+    private JLabel smRefreshCountLabel;
+
     // Background UI refresh
     private ScheduledExecutorService uiRefresher;
 
     public ConfigPanel(MontoyaApi api, TokenStore tokenStore,
                        TokenServer tokenServer, TokenCaptureHandler captureHandler,
-                       TokenPoller tokenPoller, TokenInjector tokenInjector) {
+                       TokenPoller tokenPoller, TokenInjector tokenInjector,
+                       SessionManager sessionManager) {
         this.api = api;
         this.tokenStore = tokenStore;
         this.tokenServer = tokenServer;
         this.captureHandler = captureHandler;
         this.tokenPoller = tokenPoller;
         this.tokenInjector = tokenInjector;
+        this.sessionManager = sessionManager;
 
         setLayout(new BorderLayout(10, 10));
         setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
 
-        add(createRolePanel(), BorderLayout.NORTH);
-        add(createCardPanel(), BorderLayout.CENTER);
+        // Top: Role panel + Leader/Follower cards
+        JPanel topPanel = new JPanel(new BorderLayout(10, 10));
+        topPanel.add(createRolePanel(), BorderLayout.NORTH);
+        topPanel.add(createCardPanel(), BorderLayout.CENTER);
+
+        // Bottom: Session Manager (always visible)
+        JPanel sessionManagerPanel = createSessionManagerPanel();
+
+        // Split vertically: top = role/cards, bottom = session manager
+        JSplitPane splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT,
+                topPanel, sessionManagerPanel);
+        splitPane.setResizeWeight(0.55);
+        splitPane.setOneTouchExpandable(true);
+        splitPane.setDividerSize(8);
+
+        add(splitPane, BorderLayout.CENTER);
 
         startUiRefresh();
     }
@@ -86,7 +119,7 @@ public class ConfigPanel extends JPanel {
     private JPanel createRolePanel() {
         JPanel panel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         panel.setBorder(BorderFactory.createTitledBorder(
-                BorderFactory.createEtchedBorder(), "Role",
+                BorderFactory.createEtchedBorder(), "Role (Token Sharing)",
                 TitledBorder.LEFT, TitledBorder.TOP));
 
         leaderRadio = new JRadioButton("Leader (serves tokens)", true);
@@ -202,7 +235,7 @@ public class ConfigPanel extends JPanel {
                 BorderFactory.createEtchedBorder(), "Current Tokens",
                 TitledBorder.LEFT, TitledBorder.TOP));
 
-        leaderTokenDisplay = new JTextArea(12, 50);
+        leaderTokenDisplay = new JTextArea(8, 50);
         leaderTokenDisplay.setEditable(false);
         leaderTokenDisplay.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         leaderTokenDisplay.setText("(no tokens captured yet)");
@@ -215,8 +248,6 @@ public class ConfigPanel extends JPanel {
 
     /**
      * Creates the custom headers panel with a table and +/- buttons.
-     * Each row is a header name the leader should watch for in responses.
-     * Values are captured automatically from traffic.
      */
     private JPanel createCustomHeadersPanel() {
         JPanel panel = new JPanel(new BorderLayout(4, 4));
@@ -225,7 +256,6 @@ public class ConfigPanel extends JPanel {
                 TitledBorder.LEFT, TitledBorder.TOP));
         panel.setPreferredSize(new Dimension(300, 0));
 
-        // Table model: single column "Header Name"
         leaderCustomHeadersModel = new DefaultTableModel(new String[]{"Header Name"}, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
@@ -240,7 +270,6 @@ public class ConfigPanel extends JPanel {
         tableScroll.setPreferredSize(new Dimension(280, 120));
         panel.add(tableScroll, BorderLayout.CENTER);
 
-        // +/- buttons
         JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
         JButton addBtn = new JButton("+");
         addBtn.setToolTipText("Add a custom header to watch");
@@ -258,7 +287,6 @@ public class ConfigPanel extends JPanel {
         removeBtn.addActionListener(e -> {
             int selected = leaderCustomHeadersTable.getSelectedRow();
             if (selected >= 0) {
-                // Stop editing before removing
                 if (leaderCustomHeadersTable.isEditing()) {
                     leaderCustomHeadersTable.getCellEditor().stopCellEditing();
                 }
@@ -276,11 +304,7 @@ public class ConfigPanel extends JPanel {
         return panel;
     }
 
-    /**
-     * Read all header names from the custom headers table.
-     */
     private List<String> getCustomHeaderNamesFromTable() {
-        // Stop any in-progress cell editing so the value is committed
         if (leaderCustomHeadersTable.isEditing()) {
             leaderCustomHeadersTable.getCellEditor().stopCellEditing();
         }
@@ -302,7 +326,6 @@ public class ConfigPanel extends JPanel {
         api.logging().logToOutput("[Leader] toggleLeaderServer() called, isRunning=" + tokenServer.isRunning());
 
         if (tokenServer.isRunning()) {
-            // Stop server
             tokenServer.stop();
             captureHandler.setActive(false);
 
@@ -312,7 +335,6 @@ public class ConfigPanel extends JPanel {
             setLeaderFieldsEnabled(true);
             api.logging().logToOutput("[Leader] Server stopped.");
         } else {
-            // Start server
             try {
                 int port = Integer.parseInt(leaderPortField.getText().trim());
                 String password = new String(leaderPasswordField.getPassword());
@@ -340,8 +362,6 @@ public class ConfigPanel extends JPanel {
                 leaderStatusLabel.setText("Status: Error — invalid port");
                 leaderStatusLabel.setForeground(Color.RED);
             } catch (Throwable ex) {
-                // Catch Throwable (not just Exception) to surface NoClassDefFoundError,
-                // module access errors, BindException, etc.
                 api.logging().logToError("[Leader] Failed to start server: " + ex.getClass().getName()
                         + " — " + ex.getMessage());
                 leaderStatusLabel.setText("Status: Error — " + ex.getMessage());
@@ -363,7 +383,6 @@ public class ConfigPanel extends JPanel {
     private JPanel createFollowerPanel() {
         JPanel panel = new JPanel(new BorderLayout(10, 10));
 
-        // Configuration section
         JPanel configPanel = new JPanel(new GridBagLayout());
         configPanel.setBorder(BorderFactory.createTitledBorder(
                 BorderFactory.createEtchedBorder(), "Follower Configuration",
@@ -375,14 +394,12 @@ public class ConfigPanel extends JPanel {
 
         int row = 0;
 
-        // Leader IP
         gbc.gridx = 0; gbc.gridy = row;
         configPanel.add(new JLabel("Leader IP:"), gbc);
         followerIpField = new JTextField("192.168.1.100", 15);
         gbc.gridx = 1;
         configPanel.add(followerIpField, gbc);
 
-        // Leader Port
         row++;
         gbc.gridx = 0; gbc.gridy = row;
         configPanel.add(new JLabel("Leader Port:"), gbc);
@@ -390,7 +407,6 @@ public class ConfigPanel extends JPanel {
         gbc.gridx = 1;
         configPanel.add(followerPortField, gbc);
 
-        // Password
         row++;
         gbc.gridx = 0; gbc.gridy = row;
         configPanel.add(new JLabel("Password:"), gbc);
@@ -398,7 +414,6 @@ public class ConfigPanel extends JPanel {
         gbc.gridx = 1;
         configPanel.add(followerPasswordField, gbc);
 
-        // Poll interval
         row++;
         gbc.gridx = 0; gbc.gridy = row;
         configPanel.add(new JLabel("Poll Interval (s):"), gbc);
@@ -406,7 +421,6 @@ public class ConfigPanel extends JPanel {
         gbc.gridx = 1;
         configPanel.add(followerPollIntervalField, gbc);
 
-        // Target scope
         row++;
         gbc.gridx = 0; gbc.gridy = row;
         configPanel.add(new JLabel("Target Scope:"), gbc);
@@ -415,7 +429,6 @@ public class ConfigPanel extends JPanel {
         gbc.gridx = 1;
         configPanel.add(followerTargetField, gbc);
 
-        // Connect/Disconnect button
         row++;
         gbc.gridx = 0; gbc.gridy = row; gbc.gridwidth = 2;
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
@@ -431,13 +444,12 @@ public class ConfigPanel extends JPanel {
 
         panel.add(configPanel, BorderLayout.NORTH);
 
-        // Token display
         JPanel tokenPanel = new JPanel(new BorderLayout());
         tokenPanel.setBorder(BorderFactory.createTitledBorder(
                 BorderFactory.createEtchedBorder(), "Fetched Tokens",
                 TitledBorder.LEFT, TitledBorder.TOP));
 
-        followerTokenDisplay = new JTextArea(12, 50);
+        followerTokenDisplay = new JTextArea(8, 50);
         followerTokenDisplay.setEditable(false);
         followerTokenDisplay.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         followerTokenDisplay.setText("(not connected)");
@@ -452,7 +464,6 @@ public class ConfigPanel extends JPanel {
         api.logging().logToOutput("[Follower] toggleFollowerConnection() called, isConnected=" + tokenPoller.isConnected());
 
         if (tokenPoller.isConnected()) {
-            // Disconnect
             tokenPoller.stop();
             tokenInjector.setActive(false);
 
@@ -462,7 +473,6 @@ public class ConfigPanel extends JPanel {
             setFollowerFieldsEnabled(true);
             api.logging().logToOutput("[Follower] Disconnected.");
         } else {
-            // Connect
             try {
                 String ip = followerIpField.getText().trim();
                 int port = Integer.parseInt(followerPortField.getText().trim());
@@ -507,10 +517,314 @@ public class ConfigPanel extends JPanel {
         followerTargetField.setEnabled(enabled);
     }
 
+    // ==================== Session Manager panel (always visible) ====================
+
+    /**
+     * Creates the Session Manager panel — always visible at the bottom of the tab.
+     * This feature works independently of Leader/Follower mode.
+     *
+     * Provides:
+     *   - Login macro configuration (URL, method, body, headers)
+     *   - Enable/Disable toggle
+     *   - JWT expiry buffer setting
+     *   - Test and Refresh Now buttons
+     *   - Live status display (JWT expiry countdown, refresh count)
+     */
+    private JPanel createSessionManagerPanel() {
+        JPanel outerPanel = new JPanel(new BorderLayout(8, 8));
+        outerPanel.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(),
+                "Session Manager — Auto-Refresh (works without Leader/Follower)",
+                TitledBorder.LEFT, TitledBorder.TOP));
+
+        // ---- Left side: Login macro config ----
+        JPanel configPanel = new JPanel(new GridBagLayout());
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.insets = new Insets(3, 4, 3, 4);
+        gbc.anchor = GridBagConstraints.WEST;
+
+        int row = 0;
+
+        // Enable checkbox + buffer seconds on same line
+        gbc.gridx = 0; gbc.gridy = row;
+        smEnabledCheckbox = new JCheckBox("Enable Session Manager");
+        smEnabledCheckbox.setToolTipText("When enabled: auto-checks JWT expiry before requests, refreshes on 401/403, and injects tokens");
+        smEnabledCheckbox.addActionListener(e -> toggleSessionManager());
+        configPanel.add(smEnabledCheckbox, gbc);
+
+        gbc.gridx = 1;
+        JPanel bufferPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        bufferPanel.add(new JLabel("Refresh"));
+        smBufferField = new JTextField("30", 4);
+        smBufferField.setToolTipText("Refresh the session this many seconds before the JWT expires");
+        bufferPanel.add(smBufferField);
+        bufferPanel.add(new JLabel("sec before expiry"));
+        configPanel.add(bufferPanel, gbc);
+
+        // Login URL
+        row++;
+        gbc.gridx = 0; gbc.gridy = row;
+        configPanel.add(new JLabel("Login URL:"), gbc);
+        gbc.gridx = 1; gbc.fill = GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0;
+        smLoginUrlField = new JTextField(40);
+        smLoginUrlField.setToolTipText("Full URL of the login endpoint (e.g. https://target.com/api/login)");
+        configPanel.add(smLoginUrlField, gbc);
+        gbc.fill = GridBagConstraints.NONE; gbc.weightx = 0;
+
+        // Method + Content-Type on same line
+        row++;
+        gbc.gridx = 0; gbc.gridy = row;
+        configPanel.add(new JLabel("Method:"), gbc);
+        gbc.gridx = 1;
+        JPanel methodCtPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        smMethodCombo = new JComboBox<>(new String[]{"POST", "GET", "PUT"});
+        smMethodCombo.setToolTipText("HTTP method for the login request");
+        methodCtPanel.add(smMethodCombo);
+        methodCtPanel.add(Box.createHorizontalStrut(12));
+        methodCtPanel.add(new JLabel("Content-Type:"));
+        smContentTypeField = new JTextField("application/x-www-form-urlencoded", 25);
+        smContentTypeField.setToolTipText("Content-Type header for POST/PUT requests");
+        methodCtPanel.add(smContentTypeField);
+        configPanel.add(methodCtPanel, gbc);
+
+        // Request body
+        row++;
+        gbc.gridx = 0; gbc.gridy = row; gbc.anchor = GridBagConstraints.NORTHWEST;
+        configPanel.add(new JLabel("Body:"), gbc);
+        gbc.gridx = 1; gbc.fill = GridBagConstraints.BOTH; gbc.weightx = 1.0; gbc.weighty = 0.4;
+        smBodyArea = new JTextArea(3, 40);
+        smBodyArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        smBodyArea.setToolTipText("Request body (e.g. username=admin&password=pass or JSON)");
+        smBodyArea.setLineWrap(true);
+        smBodyArea.setWrapStyleWord(true);
+        configPanel.add(new JScrollPane(smBodyArea), gbc);
+        gbc.fill = GridBagConstraints.NONE; gbc.weightx = 0; gbc.weighty = 0;
+        gbc.anchor = GridBagConstraints.WEST;
+
+        // Extra headers
+        row++;
+        gbc.gridx = 0; gbc.gridy = row; gbc.anchor = GridBagConstraints.NORTHWEST;
+        configPanel.add(new JLabel("<html>Extra<br>Headers:</html>"), gbc);
+        gbc.gridx = 1; gbc.fill = GridBagConstraints.BOTH; gbc.weightx = 1.0; gbc.weighty = 0.3;
+        smExtraHeadersArea = new JTextArea(2, 40);
+        smExtraHeadersArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        smExtraHeadersArea.setToolTipText("One header per line: Name: Value (e.g. X-Custom: abc)");
+        smExtraHeadersArea.setLineWrap(true);
+        smExtraHeadersArea.setWrapStyleWord(true);
+        configPanel.add(new JScrollPane(smExtraHeadersArea), gbc);
+        gbc.fill = GridBagConstraints.NONE; gbc.weightx = 0; gbc.weighty = 0;
+        gbc.anchor = GridBagConstraints.WEST;
+
+        // Buttons + status
+        row++;
+        gbc.gridx = 0; gbc.gridy = row; gbc.gridwidth = 2;
+        JPanel buttonStatusPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
+
+        smTestButton = new JButton("Test Login Macro");
+        smTestButton.setToolTipText("Send the login request once and show the result (doesn't need Session Manager to be enabled)");
+        smTestButton.addActionListener(e -> testLoginMacro());
+        buttonStatusPanel.add(smTestButton);
+
+        smRefreshNowButton = new JButton("Refresh Now");
+        smRefreshNowButton.setToolTipText("Force an immediate session refresh using the login macro");
+        smRefreshNowButton.addActionListener(e -> forceRefresh());
+        buttonStatusPanel.add(smRefreshNowButton);
+
+        buttonStatusPanel.add(Box.createHorizontalStrut(12));
+
+        smStatusLabel = new JLabel("Status: Disabled");
+        smStatusLabel.setForeground(Color.GRAY);
+        buttonStatusPanel.add(smStatusLabel);
+
+        configPanel.add(buttonStatusPanel, gbc);
+
+        // JWT expiry + refresh count line
+        row++;
+        gbc.gridx = 0; gbc.gridy = row; gbc.gridwidth = 2;
+        JPanel infoPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 2));
+        smJwtExpiryLabel = new JLabel("JWT: No JWT stored");
+        smJwtExpiryLabel.setFont(smJwtExpiryLabel.getFont().deriveFont(Font.ITALIC));
+        infoPanel.add(smJwtExpiryLabel);
+
+        infoPanel.add(new JLabel("|"));
+
+        smRefreshCountLabel = new JLabel("Refreshes: 0");
+        infoPanel.add(smRefreshCountLabel);
+
+        infoPanel.add(new JLabel("|"));
+
+        JLabel helpLabel = new JLabel("<html><i>Tip: Set Target Scope in Leader/Follower config first</i></html>");
+        helpLabel.setForeground(Color.GRAY);
+        infoPanel.add(helpLabel);
+
+        configPanel.add(infoPanel, gbc);
+
+        outerPanel.add(configPanel, BorderLayout.CENTER);
+
+        return outerPanel;
+    }
+
+    /**
+     * Toggle the Session Manager on/off.
+     * Reads config from UI fields and applies to the SessionManager.
+     */
+    private void toggleSessionManager() {
+        boolean enable = smEnabledCheckbox.isSelected();
+
+        if (enable) {
+            // Read config from UI
+            String loginUrl = smLoginUrlField.getText().trim();
+            if (loginUrl.isEmpty()) {
+                JOptionPane.showMessageDialog(this,
+                        "Please enter a Login URL before enabling the Session Manager.",
+                        "Session Manager", JOptionPane.WARNING_MESSAGE);
+                smEnabledCheckbox.setSelected(false);
+                return;
+            }
+
+            // Also need target scope
+            String target = tokenStore.getTarget();
+            if (target == null || target.isEmpty()) {
+                JOptionPane.showMessageDialog(this,
+                        "Please set the Target Scope (in Leader or Follower config above)\n"
+                                + "before enabling the Session Manager.\n\n"
+                                + "The Session Manager needs to know which domains to manage.",
+                        "Session Manager", JOptionPane.WARNING_MESSAGE);
+                smEnabledCheckbox.setSelected(false);
+                return;
+            }
+
+            applySessionManagerConfig();
+            sessionManager.setEnabled(true);
+
+            smStatusLabel.setText("Status: Enabled");
+            smStatusLabel.setForeground(new Color(0, 128, 0));
+            setSessionManagerFieldsEnabled(false);
+            api.logging().logToOutput("[SessionManager] Enabled. URL: " + loginUrl);
+        } else {
+            sessionManager.setEnabled(false);
+
+            smStatusLabel.setText("Status: Disabled");
+            smStatusLabel.setForeground(Color.GRAY);
+            setSessionManagerFieldsEnabled(true);
+            api.logging().logToOutput("[SessionManager] Disabled.");
+        }
+    }
+
+    /**
+     * Apply current UI field values to the SessionManager config.
+     */
+    private void applySessionManagerConfig() {
+        sessionManager.setLoginUrl(smLoginUrlField.getText().trim());
+        sessionManager.setLoginMethod((String) smMethodCombo.getSelectedItem());
+        sessionManager.setLoginContentType(smContentTypeField.getText().trim());
+        sessionManager.setLoginBody(smBodyArea.getText());
+        sessionManager.setLoginExtraHeaders(smExtraHeadersArea.getText());
+
+        try {
+            int buffer = Integer.parseInt(smBufferField.getText().trim());
+            sessionManager.setExpiryBufferSeconds(buffer);
+        } catch (NumberFormatException ex) {
+            sessionManager.setExpiryBufferSeconds(30);
+        }
+    }
+
+    /**
+     * Test the login macro without enabling the Session Manager.
+     * Sends the login request and shows the result in a dialog.
+     */
+    private void testLoginMacro() {
+        String loginUrl = smLoginUrlField.getText().trim();
+        if (loginUrl.isEmpty()) {
+            JOptionPane.showMessageDialog(this,
+                    "Please enter a Login URL first.",
+                    "Test Login Macro", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        smTestButton.setEnabled(false);
+        smTestButton.setText("Testing...");
+
+        // Run on background thread to avoid blocking EDT
+        Thread.ofVirtual().start(() -> {
+            try {
+                // Temporarily apply config for testing
+                applySessionManagerConfig();
+                boolean wasEnabled = sessionManager.isEnabled();
+                sessionManager.setEnabled(true);
+                boolean success = sessionManager.refreshSession();
+                sessionManager.setEnabled(wasEnabled);
+
+                String status = sessionManager.getLastRefreshStatus();
+
+                SwingUtilities.invokeLater(() -> {
+                    smTestButton.setEnabled(true);
+                    smTestButton.setText("Test Login Macro");
+
+                    if (success) {
+                        JOptionPane.showMessageDialog(this,
+                                "Login macro succeeded!\n\n" + status
+                                        + "\n\nTokens have been updated. Check the token display above.",
+                                "Test Login Macro", JOptionPane.INFORMATION_MESSAGE);
+                    } else {
+                        JOptionPane.showMessageDialog(this,
+                                "Login macro failed.\n\n" + status
+                                        + "\n\nCheck the login URL, method, body, and credentials.",
+                                "Test Login Macro", JOptionPane.ERROR_MESSAGE);
+                    }
+                });
+            } catch (Throwable ex) {
+                SwingUtilities.invokeLater(() -> {
+                    smTestButton.setEnabled(true);
+                    smTestButton.setText("Test Login Macro");
+                    JOptionPane.showMessageDialog(this,
+                            "Error: " + ex.getMessage(),
+                            "Test Login Macro", JOptionPane.ERROR_MESSAGE);
+                });
+            }
+        });
+    }
+
+    /**
+     * Force an immediate session refresh.
+     */
+    private void forceRefresh() {
+        if (!sessionManager.isEnabled()) {
+            JOptionPane.showMessageDialog(this,
+                    "Enable the Session Manager first.",
+                    "Refresh Now", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        smRefreshNowButton.setEnabled(false);
+        smRefreshNowButton.setText("Refreshing...");
+
+        Thread.ofVirtual().start(() -> {
+            boolean success = sessionManager.refreshSession();
+            SwingUtilities.invokeLater(() -> {
+                smRefreshNowButton.setEnabled(true);
+                smRefreshNowButton.setText("Refresh Now");
+
+                String msg = success ? "Session refreshed successfully!" : "Refresh failed: " + sessionManager.getLastRefreshStatus();
+                smStatusLabel.setText("Status: " + sessionManager.getLastRefreshStatus());
+                smStatusLabel.setForeground(success ? new Color(0, 128, 0) : Color.RED);
+            });
+        });
+    }
+
+    private void setSessionManagerFieldsEnabled(boolean enabled) {
+        smLoginUrlField.setEnabled(enabled);
+        smMethodCombo.setEnabled(enabled);
+        smContentTypeField.setEnabled(enabled);
+        smBodyArea.setEnabled(enabled);
+        smExtraHeadersArea.setEnabled(enabled);
+        smBufferField.setEnabled(enabled);
+    }
+
     // ==================== Periodic UI refresh ====================
 
     /**
-     * Refreshes the token display areas every 2 seconds on the EDT.
+     * Refreshes the token display areas and session manager status every 2 seconds.
      */
     private void startUiRefresh() {
         uiRefresher = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -562,6 +876,46 @@ public class ConfigPanel extends JPanel {
                         }
                         followerStatusLabel.setText(status);
                     }
+
+                    // ---- Session Manager live status ----
+                    // JWT expiry countdown (updates every 2 seconds)
+                    smJwtExpiryLabel.setText("JWT: " + sessionManager.getJwtExpiryInfo());
+
+                    // Color the JWT label based on expiry status
+                    String expiryInfo = sessionManager.getJwtExpiryInfo();
+                    if (expiryInfo.startsWith("EXPIRED")) {
+                        smJwtExpiryLabel.setForeground(Color.RED);
+                    } else if (expiryInfo.startsWith("Expires in")) {
+                        try {
+                            String numStr = expiryInfo.replace("Expires in ", "").replace("s", "");
+                            int remaining = Integer.parseInt(numStr);
+                            if (remaining <= 60) {
+                                smJwtExpiryLabel.setForeground(Color.ORANGE);
+                            } else {
+                                smJwtExpiryLabel.setForeground(new Color(0, 128, 0));
+                            }
+                        } catch (NumberFormatException e) {
+                            smJwtExpiryLabel.setForeground(Color.GRAY);
+                        }
+                    } else {
+                        smJwtExpiryLabel.setForeground(Color.GRAY);
+                    }
+
+                    // Refresh count
+                    smRefreshCountLabel.setText("Refreshes: " + sessionManager.getRefreshCount());
+
+                    // Status label (when enabled and running)
+                    if (sessionManager.isEnabled()) {
+                        String lastStatus = sessionManager.getLastRefreshStatus();
+                        if (lastStatus.startsWith("OK")) {
+                            smStatusLabel.setText("Status: Enabled | Last: " + lastStatus);
+                            smStatusLabel.setForeground(new Color(0, 128, 0));
+                        } else if (lastStatus.startsWith("Failed") || lastStatus.startsWith("Error")) {
+                            smStatusLabel.setText("Status: Enabled | Last: " + lastStatus);
+                            smStatusLabel.setForeground(Color.ORANGE);
+                        }
+                    }
+
                 } catch (Exception e) {
                     // Silently handle UI refresh errors
                 }

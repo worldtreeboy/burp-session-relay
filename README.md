@@ -1,6 +1,6 @@
 # Burp Session Share
 
-A Burp Suite extension (Montoya API) that lets a penetration testing team share session tokens across multiple Burp instances over the LAN.
+A Burp Suite extension (Montoya API) that lets a penetration testing team share session tokens across multiple Burp instances over the LAN — plus a built-in **Session Manager** that auto-refreshes expired tokens during active scans.
 
 When a team shares a single user account on a target application, keeping everyone authenticated is a pain. This extension solves that with a **Leader / Follower** model — one person maintains the session, everyone else stays in sync automatically.
 
@@ -31,6 +31,51 @@ When a team shares a single user account on a target application, keeping everyo
 - Poll the leader's server at a configurable interval (default: 5 seconds)
 - Auto-inject fetched tokens (cookies, JWT, CSRF, custom headers) into every outgoing request matching the target scope
 - On 401/403 responses, immediately re-fetch tokens from the leader
+
+## Session Manager (Auto-Refresh)
+
+The Session Manager keeps your session alive automatically — **no Leader/Follower server required**. It works as a standalone feature for solo pentesters or alongside the team sharing features.
+
+### How it works
+
+You configure a **login macro** (the HTTP request that authenticates you). The extension then:
+
+1. **JWT Expiry Pre-check** — Before every outgoing request, decodes the JWT's `exp` claim. If it expires within the buffer window (default: 30 seconds), the login macro fires automatically *before* the request goes out. This prevents 401s proactively.
+
+2. **401/403 Auto-refresh** — If any in-scope response comes back 401 or 403, the login macro fires on a background thread. All subsequent requests get the fresh tokens.
+
+3. **Token capture from login response** — After the login macro runs, the extension extracts new cookies, JWTs (from headers, Set-Cookie, and response body), and CSRF tokens automatically.
+
+### Why this matters for active scanning
+
+Without the Session Manager, a long active scan can lose its session mid-scan — every request after expiry gets 401, making the scan results useless. With it:
+
+- Active scan request about to go out → pre-check catches expired JWT → login macro runs → fresh token injected → request succeeds
+- If a 401 slips through, the response handler refreshes for all following requests
+- Rate-limited to one refresh per 5 seconds (prevents flooding the login endpoint)
+
+### Session Manager Setup
+
+1. Set the **Target Scope** in the Leader or Follower config (the Session Manager uses the same scope)
+2. Scroll down to the **Session Manager** panel (always visible at the bottom)
+3. Enter the **Login URL** (e.g., `https://target.com/api/login`)
+4. Set the **Method** (POST/GET/PUT) and **Content-Type**
+5. Enter the **Body** (e.g., `username=admin&password=pass123` or `{"user":"admin","pass":"secret"}`)
+6. Optionally add **Extra Headers** (one per line, `Name: Value` format)
+7. Click **Test Login Macro** to verify it works (shows success/failure dialog)
+8. Check **Enable Session Manager**
+9. The live status shows JWT expiry countdown, refresh count, and last refresh result
+
+### UI Features
+
+| Feature | Description |
+|---------|-------------|
+| **Enable checkbox** | Validates that Login URL and Target Scope are set before enabling |
+| **Test Login Macro** | Sends the login request once without enabling auto-refresh — shows result dialog |
+| **Refresh Now** | Force an immediate session refresh |
+| **JWT countdown** | Live display: "Expires in 285s" with color coding (green > 60s, orange < 60s, red = expired) |
+| **Refresh counter** | Tracks total number of auto-refreshes performed |
+| **Expiry buffer** | Configurable seconds before expiry to trigger refresh (default: 30) |
 
 ## What Gets Shared
 
@@ -116,6 +161,15 @@ The JAR will be at `build/libs/session-share.jar`.
 6. Click **Connect**
 7. Tokens are now auto-injected into your requests
 
+### Solo Use (Session Manager only)
+
+1. Switch to the **Session Share** tab
+2. Set the **Target Scope** in either Leader or Follower config (no need to start server or connect)
+3. Configure the **Login Macro** in the Session Manager panel at the bottom
+4. Click **Test Login Macro** to verify it works
+5. Check **Enable Session Manager**
+6. Run your active scan — the session stays alive automatically
+
 ## Project Structure
 
 ```
@@ -129,8 +183,11 @@ src/main/java/com/sessionshare/
 ├── follower/
 │   ├── TokenPoller.java            # Polls leader for tokens
 │   └── TokenInjector.java          # Injects tokens into requests
+├── session/
+│   ├── SessionManager.java         # Login macro, JWT expiry check, auto-refresh
+│   └── SessionHttpHandler.java     # HTTP handler for session management
 ├── scanner/
-│   └── JwtPassiveScanCheck.java    # Passive JWT security scanner
+│   └── JwtPassiveScanCheck.java    # Passive + active JWT security scanner
 └── ui/
     └── ConfigPanel.java            # Swing UI tab
 ```
@@ -146,7 +203,8 @@ src/main/java/com/sessionshare/
 
 - Burp Suite Professional or Community (with Montoya API support)
 - Java 17+
-- Team members on the same LAN
+- Team members on the same LAN (for Leader/Follower sharing)
+- Session Manager works solo — no LAN required
 
 ## Security Note
 
