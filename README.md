@@ -45,11 +45,15 @@ When a team shares a single user account on a target application, keeping everyo
 
 The extension also includes a passive scan check that flags JWT security issues:
 
-- **Algorithm "none"** — no signature verification
-- **HS256** — susceptible to brute-force with weak secrets
-- **Missing expiry** — tokens that never expire
-- **Expired tokens** — still accepted by the server
-- **Sensitive data in payload** — passwords, SSNs, credit card numbers in JWT claims
+| Finding | What it detects | Severity |
+|---------|----------------|----------|
+| **Algorithm "none"** | JWT header has `"alg": "none"` — no signature | High |
+| **Missing expiry** | JWT payload has no `exp` claim — token never expires | Medium |
+| **Expired token accepted** | Expired JWT sent in request AND server responded 2xx (confirmed acceptance) | High |
+| **Sensitive data in payload** | JWT payload contains fields like `password`, `ssn`, `credit_card` | High |
+| **HS256 usage** | JWT uses HS256 — informational flag to remind tester to attempt offline secret cracking with `hashcat -m 16500` | Info |
+
+All checks are passive (read-only analysis of traffic flowing through Burp). No active requests are sent.
 
 ## Installation
 
