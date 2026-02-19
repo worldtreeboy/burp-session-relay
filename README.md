@@ -66,6 +66,62 @@ Without the Session Manager, a long active scan can lose its session mid-scan �
 8. Check **Enable Session Manager**
 9. The live status shows JWT expiry countdown, refresh count, and last refresh result
 
+### Tab Layout
+
+The Session Manager panel sits at the **bottom half** of the Session Share tab, below the Leader/Follower cards. Drag the divider to resize.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Role (Token Sharing)                                   │
+│  ○ Leader  ○ Follower                                   │
+│  [Leader/Follower config fields + token display]        │
+│                                                         │
+├═══════════════════ draggable divider ═══════════════════─┤
+│                                                         │
+│  Session Manager — Auto-Refresh                         │
+│  [✓] Enable Session Manager       Refresh [30] sec      │
+│                                                         │
+│  Login URL:      [https://target.com/api/login        ] │
+│  Method: [POST ▼]   Content-Type: [application/json   ] │
+│  Body:           [{"user":"admin","pass":"secret"}     ] │
+│  Extra Headers:  [X-Custom-Header: value              ] │
+│                                                         │
+│  [Test Login Macro]  [Refresh Now]                      │
+│  JWT: Expires in 285s | Refreshes: 3                    │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Example: Form-based login (POST with URL-encoded body)
+
+```
+Login URL:      https://academy.hackthebox.com/api/v1/login
+Method:         POST
+Content-Type:   application/x-www-form-urlencoded
+Body:           email=user@test.com&password=MyPassword123
+Extra Headers:  (leave empty)
+```
+
+### Example: JSON API login
+
+```
+Login URL:      https://api.target.com/auth/login
+Method:         POST
+Content-Type:   application/json
+Body:           {"username":"admin","password":"P@ssw0rd!"}
+Extra Headers:  X-Requested-With: XMLHttpRequest
+```
+
+### Example: Login with CSRF token
+
+```
+Login URL:      https://target.com/login
+Method:         POST
+Content-Type:   application/x-www-form-urlencoded
+Body:           username=admin&password=secret&_token=abc123
+Extra Headers:  X-CSRF-Token: abc123
+                Referer: https://target.com/login
+```
+
 ### UI Features
 
 | Feature | Description |
