@@ -5,6 +5,7 @@ import burp.api.montoya.MontoyaApi;
 
 import com.sessionshare.follower.TokenInjector;
 import com.sessionshare.follower.TokenPoller;
+import com.sessionshare.leader.SocksRelayServer;
 import com.sessionshare.leader.TokenCaptureHandler;
 import com.sessionshare.leader.TokenServer;
 import com.sessionshare.model.TokenStore;
@@ -29,6 +30,7 @@ public class SessionShareExtension implements BurpExtension {
 
     private TokenStore tokenStore;
     private TokenServer tokenServer;
+    private SocksRelayServer socksRelayServer;
     private TokenCaptureHandler captureHandler;
     private TokenPoller tokenPoller;
     private TokenInjector tokenInjector;
@@ -46,6 +48,7 @@ public class SessionShareExtension implements BurpExtension {
 
         // 2. Leader components
         tokenServer = new TokenServer(api, tokenStore);
+        socksRelayServer = new SocksRelayServer(api);
         captureHandler = new TokenCaptureHandler(api, tokenStore);
 
         // 3. Follower components
@@ -68,7 +71,7 @@ public class SessionShareExtension implements BurpExtension {
         api.scanner().registerScanCheck(new JwtPassiveScanCheck(api));
 
         // 8. Build and register the UI tab
-        configPanel = new ConfigPanel(api, tokenStore, tokenServer, captureHandler,
+        configPanel = new ConfigPanel(api, tokenStore, tokenServer, socksRelayServer, captureHandler,
                 tokenPoller, tokenInjector, sessionManager);
         api.userInterface().registerSuiteTab("Session Share", configPanel);
 
@@ -78,6 +81,7 @@ public class SessionShareExtension implements BurpExtension {
 
             // Stop leader server
             tokenServer.stop();
+            socksRelayServer.stop();
             captureHandler.setActive(false);
 
             // Stop follower polling

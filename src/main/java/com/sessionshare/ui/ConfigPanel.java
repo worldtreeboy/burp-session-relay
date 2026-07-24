@@ -3,6 +3,7 @@ package com.sessionshare.ui;
 import burp.api.montoya.MontoyaApi;
 import com.sessionshare.follower.TokenInjector;
 import com.sessionshare.follower.TokenPoller;
+import com.sessionshare.leader.SocksRelayServer;
 import com.sessionshare.leader.TokenCaptureHandler;
 import com.sessionshare.leader.TokenServer;
 import com.sessionshare.model.TokenStore;
@@ -28,6 +29,7 @@ public class ConfigPanel extends JPanel {
     private final MontoyaApi api;
     private final TokenStore tokenStore;
     private final TokenServer tokenServer;
+    private final SocksRelayServer socksRelayServer;
     private final TokenCaptureHandler captureHandler;
     private final TokenPoller tokenPoller;
     private final TokenInjector tokenInjector;
@@ -51,6 +53,9 @@ public class ConfigPanel extends JPanel {
     private JTextArea leaderTokenDisplay;
     private DefaultTableModel leaderCustomHeadersModel;
     private JTable leaderCustomHeadersTable;
+    private JCheckBox socksEnabledCheckbox;
+    private JTextField socksPortField;
+    private JLabel socksStatusLabel;
 
     // Follower controls
     private JTextField followerIpField;
@@ -80,12 +85,14 @@ public class ConfigPanel extends JPanel {
     private ScheduledExecutorService uiRefresher;
 
     public ConfigPanel(MontoyaApi api, TokenStore tokenStore,
-                       TokenServer tokenServer, TokenCaptureHandler captureHandler,
+                       TokenServer tokenServer, SocksRelayServer socksRelayServer,
+                       TokenCaptureHandler captureHandler,
                        TokenPoller tokenPoller, TokenInjector tokenInjector,
                        SessionManager sessionManager) {
         this.api = api;
         this.tokenStore = tokenStore;
         this.tokenServer = tokenServer;
+        this.socksRelayServer = socksRelayServer;
         this.captureHandler = captureHandler;
         this.tokenPoller = tokenPoller;
         this.tokenInjector = tokenInjector;
@@ -208,6 +215,23 @@ public class ConfigPanel extends JPanel {
         gbc.gridx = 1;
         configPanel.add(leaderCsrfHeaderField, gbc);
 
+        // SOCKS5 relay (share this machine's VPN route with followers' own Burp traffic)
+        row++;
+        gbc.gridx = 0; gbc.gridy = row;
+        configPanel.add(new JLabel("SOCKS5 Relay:"), gbc);
+        JPanel socksRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        socksEnabledCheckbox = new JCheckBox("Enable");
+        socksEnabledCheckbox.setToolTipText("<html>Starts a SOCKS5 proxy alongside the token server. Followers point their own<br>"
+                + "Burp's upstream SOCKS proxy (Project options &rarr; Connections) at this leader,<br>"
+                + "so their Burp traffic is relayed through this machine — including any VPN<br>"
+                + "route this machine has. Uses the same password above (as SOCKS username/password auth).</html>");
+        socksPortField = new JTextField("1080", 6);
+        socksRow.add(socksEnabledCheckbox);
+        socksRow.add(new JLabel("Port:"));
+        socksRow.add(socksPortField);
+        gbc.gridx = 1;
+        configPanel.add(socksRow, gbc);
+
         // Start/Stop button
         row++;
         gbc.gridx = 0; gbc.gridy = row; gbc.gridwidth = 2;
@@ -220,6 +244,14 @@ public class ConfigPanel extends JPanel {
         leaderStatusLabel.setForeground(Color.RED);
         buttonPanel.add(leaderStatusLabel);
         configPanel.add(buttonPanel, gbc);
+        gbc.gridwidth = 1;
+
+        // SOCKS status (separate line — it's a second service with its own state)
+        row++;
+        gbc.gridx = 0; gbc.gridy = row; gbc.gridwidth = 2;
+        socksStatusLabel = new JLabel("SOCKS: stopped");
+        socksStatusLabel.setForeground(Color.GRAY);
+        configPanel.add(socksStatusLabel, gbc);
         gbc.gridwidth = 1;
 
         topPanel.add(configPanel, BorderLayout.CENTER);
@@ -329,6 +361,12 @@ public class ConfigPanel extends JPanel {
             tokenServer.stop();
             captureHandler.setActive(false);
 
+            if (socksRelayServer.isRunning()) {
+                socksRelayServer.stop();
+            }
+            socksStatusLabel.setText("SOCKS: stopped");
+            socksStatusLabel.setForeground(Color.GRAY);
+
             leaderStartStopButton.setText("Start Server");
             leaderStatusLabel.setText("Status: Stopped");
             leaderStatusLabel.setForeground(Color.RED);
@@ -357,6 +395,26 @@ public class ConfigPanel extends JPanel {
                 leaderStatusLabel.setForeground(new Color(0, 128, 0));
                 setLeaderFieldsEnabled(false);
                 api.logging().logToOutput("[Leader] Server started successfully on port " + port);
+
+                if (socksEnabledCheckbox.isSelected()) {
+                    try {
+                        int socksPort = Integer.parseInt(socksPortField.getText().trim());
+                        socksRelayServer.setPassword(password);
+                        socksRelayServer.start(socksPort);
+                        socksStatusLabel.setText("SOCKS: running on port " + socksPort);
+                        socksStatusLabel.setForeground(new Color(0, 128, 0));
+                        api.logging().logToOutput("[Leader] SOCKS relay started on port " + socksPort);
+                    } catch (NumberFormatException ex) {
+                        api.logging().logToError("[Leader] Invalid SOCKS port: " + ex.getMessage());
+                        socksStatusLabel.setText("SOCKS: error — invalid port");
+                        socksStatusLabel.setForeground(Color.RED);
+                    } catch (Throwable ex) {
+                        api.logging().logToError("[Leader] Failed to start SOCKS relay: "
+                                + ex.getClass().getName() + " — " + ex.getMessage());
+                        socksStatusLabel.setText("SOCKS: error — " + ex.getMessage());
+                        socksStatusLabel.setForeground(Color.RED);
+                    }
+                }
             } catch (NumberFormatException ex) {
                 api.logging().logToError("[Leader] Invalid port: " + ex.getMessage());
                 leaderStatusLabel.setText("Status: Error — invalid port");
@@ -376,6 +434,8 @@ public class ConfigPanel extends JPanel {
         leaderTargetField.setEnabled(enabled);
         leaderCsrfHeaderField.setEnabled(enabled);
         leaderCustomHeadersTable.setEnabled(enabled);
+        socksEnabledCheckbox.setEnabled(enabled);
+        socksPortField.setEnabled(enabled);
     }
 
     // ==================== Follower panel ====================
@@ -440,6 +500,15 @@ public class ConfigPanel extends JPanel {
         followerStatusLabel.setForeground(Color.RED);
         buttonPanel.add(followerStatusLabel);
         configPanel.add(buttonPanel, gbc);
+        gbc.gridwidth = 1;
+
+        row++;
+        gbc.gridx = 0; gbc.gridy = row; gbc.gridwidth = 2;
+        JLabel socksHintLabel = new JLabel("<html><i>Want this Burp's own traffic (scans, Repeater, etc.) to go through the "
+                + "leader's VPN too?<br>Enable the leader's SOCKS5 Relay, then set Project options &rarr; Connections "
+                + "&rarr; SOCKS Proxy<br>to the leader's IP and SOCKS port here, with the same password as username/password.</i></html>");
+        socksHintLabel.setForeground(Color.GRAY);
+        configPanel.add(socksHintLabel, gbc);
         gbc.gridwidth = 1;
 
         panel.add(configPanel, BorderLayout.NORTH);
@@ -846,6 +915,14 @@ public class ConfigPanel extends JPanel {
                     if (tokenServer.isRunning()) {
                         leaderStatusLabel.setText("Status: Running | Requests: "
                                 + tokenServer.getRequestCount());
+                    }
+
+                    // Update SOCKS relay status
+                    if (socksRelayServer.isRunning()) {
+                        socksStatusLabel.setText("SOCKS: running | Active: "
+                                + socksRelayServer.getActiveConnections()
+                                + " | Total: " + socksRelayServer.getTotalConnections());
+                        socksStatusLabel.setForeground(new Color(0, 128, 0));
                     }
 
                     // Update follower token display

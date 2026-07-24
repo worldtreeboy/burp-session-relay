@@ -32,6 +32,21 @@ When a team shares a single user account on a target application, keeping everyo
 - Auto-inject fetched tokens (cookies, JWT, CSRF, custom headers) into every outgoing request matching the target scope
 - On 401/403 responses, immediately re-fetch tokens from the leader
 
+## SOCKS5 Traffic Relay (share a VPN route)
+
+Token sharing keeps everyone authenticated, but it doesn't get anyone's packets onto a VPN-only target network — that's a routing problem, not a session problem. If only the leader holds a VPN seat, the leader can also expose a **SOCKS5 relay** so followers' own Burp traffic egresses through the leader's machine (and therefore through its VPN route).
+
+### How it works
+
+- The leader checks **Enable** under **SOCKS5 Relay** in the Leader Configuration panel and sets a port (default: `1080`), then clicks **Start Server** (this starts the token server and the SOCKS relay together).
+- The relay is a minimal SOCKS5 server (RFC 1928, `CONNECT` only) gated with username/password auth (RFC 1929) using the same **Password** field as the token server. Domain names are resolved on the leader's machine (remote DNS), which is what makes split-DNS VPNs work correctly.
+- Each follower sets Burp's own **Project options → Connections → SOCKS Proxy** to the leader's IP and SOCKS port, with any username and the shared password. From then on, that follower's Burp — proxied traffic, active/passive scans, Repeater, everything — routes through the leader's machine.
+
+### What it does *not* do
+
+- It only relays traffic that Burp itself sends. A phone or other device's raw (non-Burp) traffic isn't proxy-aware and won't be touched by this — that would need OS-level routing/NAT or a local SOCKS-aware redirector on whatever device sits between the phone and the leader, which is outside what a Burp extension can do.
+- It's not scoped to the target domain — anyone with the password can relay a connection to any host reachable from the leader's machine. Treat the password with the same care as the token-server password; this is a trusted-LAN pentest tool, not internet-facing infrastructure.
+
 ## Session Manager (Auto-Refresh)
 
 The Session Manager keeps your session alive automatically — **no Leader/Follower server required**. It works as a standalone feature for solo pentesters or alongside the team sharing features.
@@ -144,9 +159,7 @@ Extra Headers:  X-CSRF-Token: abc123
 
 ## JWT Scanner
 
-The extension includes both passive and active JWT security checks.
-
-### Passive Checks (read-only traffic analysis)
+The extension includes a passive JWT security check (read-only traffic analysis — it never sends forged requests).
 
 | Finding | What it detects | Severity |
 |---------|----------------|----------|
@@ -156,25 +169,9 @@ The extension includes both passive and active JWT security checks.
 | **Sensitive data in payload** | JWT payload contains fields like `password`, `ssn`, `credit_card` | High |
 | **HS256 usage** | JWT uses HS256 — informational flag to remind tester to attempt offline secret cracking with `hashcat -m 16500` | Info |
 
-### Active Checks (sends requests during active scan)
-
-| Finding | What it does | Severity |
-|---------|-------------|----------|
-| **alg:none bypass** | Changes algorithm to `"none"`, strips signature — confirms if server accepts unsigned tokens | High |
-| **Empty signature** | Keeps original algorithm but removes the signature — confirms if server validates signatures at all | High |
-| **Corrupted signature** | Flips bytes in the signature — confirms if server does real cryptographic verification | High |
-| **Expiry removal** | Removes the `exp` claim from the payload — confirms if server enforces token expiry | High |
-| **kid SQL injection** | Injects SQL payloads (`' UNION SELECT 'secret' --`, etc.) into the `kid` header — confirms if server uses kid in raw SQL | High |
-| **kid path traversal** | Injects traversal paths (`../../../dev/null`) into `kid` — confirms if server uses kid as a file path | High |
-| **jku header injection** | Injects a Burp Collaborator URL into the `jku` header — confirms if server fetches external signing keys (SSRF) | High |
-| **nbf bypass** | Sets `nbf` (not before) to 1 year in the future — confirms if server enforces token activation time | High |
-
 ### Where do findings appear?
 
-JWT scanner findings show up in Burp's **Dashboard** (Issues tab) and **Target → Issues** — not in the Session Share extension tab. They appear alongside Burp's own findings with the severity and confidence levels shown above.
-
-- **Passive checks** fire automatically as traffic flows through Burp's proxy
-- **Active checks** only run when you trigger an active scan (right-click a request → **Do active scan**)
+JWT scanner findings show up in Burp's **Dashboard** (Issues tab) and **Target → Issues** — not in the Session Share extension tab. They appear alongside Burp's own findings with the severity and confidence levels shown above, and fire automatically as traffic flows through Burp's proxy.
 
 ## Installation
 
@@ -204,8 +201,9 @@ The JAR will be at `build/libs/session-share.jar`.
 3. Set the **Target Scope** to your target domain (e.g., `academy.hackthebox.com`)
 4. Set a **Password** (shared secret for LAN authentication)
 5. Optionally configure **CSRF Header** name and **Custom Headers** via the `[+]` button
-6. Click **Start Server**
-7. Browse the target app — tokens are captured automatically
+6. Optionally check **Enable** under **SOCKS5 Relay** and set a port (default: `1080`) to also share this machine's network route (e.g. a VPN) with followers
+7. Click **Start Server**
+8. Browse the target app — tokens are captured automatically
 
 ### Follower Setup
 
@@ -216,6 +214,7 @@ The JAR will be at `build/libs/session-share.jar`.
 5. Set the **Target Scope** to match the leader's
 6. Click **Connect**
 7. Tokens are now auto-injected into your requests
+8. If the leader enabled the SOCKS5 Relay and you need their VPN route too, set Burp's **Project options → Connections → SOCKS Proxy** to the leader's IP and SOCKS port, with the same password
 
 ### Solo Use (Session Manager only)
 
@@ -235,7 +234,8 @@ src/main/java/com/sessionshare/
 │   └── TokenStore.java             # Thread-safe token storage
 ├── leader/
 │   ├── TokenCaptureHandler.java    # Captures tokens from proxy traffic
-│   └── TokenServer.java            # Embedded HTTP server (raw ServerSocket)
+│   ├── TokenServer.java            # Embedded HTTP server (raw ServerSocket)
+│   └── SocksRelayServer.java       # Embedded SOCKS5 relay (shares the leader's route/VPN)
 ├── follower/
 │   ├── TokenPoller.java            # Polls leader for tokens
 │   └── TokenInjector.java          # Injects tokens into requests
