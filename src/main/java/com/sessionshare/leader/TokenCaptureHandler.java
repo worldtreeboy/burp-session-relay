@@ -8,6 +8,7 @@ import burp.api.montoya.proxy.http.*;
 
 import com.sessionshare.model.TokenStore;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -108,51 +109,62 @@ public class TokenCaptureHandler implements HttpHandler, ProxyResponseHandler {
     // ==================== Token extraction logic ====================
 
     /**
-     * Extract cookies, JWTs, and CSRF tokens from response headers and body.
+     * Extract cookies, JWTs, and CSRF tokens from response headers and body, then apply them
+     * to the token store as a single atomic batch — see TokenStore.applyCapturedResponse for why.
      */
     private void extractTokensFromResponse(List<HttpHeader> headers, String body) {
+        Map<String, String> capturedCookies = new LinkedHashMap<>();
+        Map<String, String> capturedCustomHeaders = new LinkedHashMap<>();
+        String capturedJwt = null;
+        String capturedCsrf = null;
+
+        String csrfHeader = tokenStore.getCsrfHeaderName();
+
         for (HttpHeader header : headers) {
             String name = header.name();
             String value = header.value();
 
             // Extract Set-Cookie headers
             if ("Set-Cookie".equalsIgnoreCase(name)) {
-                parseCookie(value);
+                String cookieJwt = parseCookie(value, capturedCookies);
+                if (cookieJwt != null) capturedJwt = cookieJwt;
             }
 
             // Extract JWT from any header value
             Matcher jwtMatcher = JWT_PATTERN.matcher(value);
             if (jwtMatcher.find()) {
-                tokenStore.setJwt(jwtMatcher.group());
+                capturedJwt = jwtMatcher.group();
                 api.logging().logToOutput("[Leader] Captured JWT from response header: " + name);
             }
 
             // Extract CSRF token from configured header
-            String csrfHeader = tokenStore.getCsrfHeaderName();
             if (!csrfHeader.isEmpty() && csrfHeader.equalsIgnoreCase(name)) {
-                tokenStore.setCsrfValue(value.trim());
+                capturedCsrf = value.trim();
                 api.logging().logToOutput("[Leader] Captured CSRF token from header: " + csrfHeader);
             }
 
             // Extract custom watched headers
             if (tokenStore.isWatchedHeader(name)) {
-                tokenStore.setCustomHeader(name, value.trim());
+                capturedCustomHeaders.put(name, value.trim());
                 api.logging().logToOutput("[Leader] Captured custom header: " + name);
             }
         }
 
         // Check response body for CSRF tokens in meta tags
         if (body != null && !body.isEmpty()) {
-            extractCsrfFromBody(body);
+            String bodyCsrf = extractCsrfFromBody(body, csrfHeader);
+            if (bodyCsrf != null) capturedCsrf = bodyCsrf;
         }
+
+        tokenStore.applyCapturedResponse(capturedCookies, capturedJwt, capturedCsrf, capturedCustomHeaders);
     }
 
     /**
-     * Parse a Set-Cookie header value and store the cookie name/value pair.
-     * Format: "name=value; Path=/; HttpOnly; ..."
+     * Parse a Set-Cookie header value ("name=value; Path=/; HttpOnly; ...") into the given map.
+     * Returns an embedded JWT if the cookie value itself looks like one, else null.
      */
-    private void parseCookie(String setCookieValue) {
-        if (setCookieValue == null || setCookieValue.isEmpty()) return;
+    private String parseCookie(String setCookieValue, Map<String, String> capturedCookies) {
+        if (setCookieValue == null || setCookieValue.isEmpty()) return null;
 
         // The cookie name=value is the first part before any ";"
         String[] parts = setCookieValue.split(";", 2);
@@ -162,24 +174,25 @@ public class TokenCaptureHandler implements HttpHandler, ProxyResponseHandler {
         if (equalsIndex > 0) {
             String cookieName = nameValue.substring(0, equalsIndex).trim();
             String cookieValue = nameValue.substring(equalsIndex + 1).trim();
-            tokenStore.setCookie(cookieName, cookieValue);
+            capturedCookies.put(cookieName, cookieValue);
             api.logging().logToOutput("[Leader] Captured cookie: " + cookieName);
         }
 
         // Check if the cookie value itself is a JWT
         Matcher jwtMatcher = JWT_PATTERN.matcher(setCookieValue);
         if (jwtMatcher.find()) {
-            tokenStore.setJwt(jwtMatcher.group());
             api.logging().logToOutput("[Leader] Captured JWT from Set-Cookie value");
+            return jwtMatcher.group();
         }
+        return null;
     }
 
     /**
-     * Try to extract CSRF tokens from HTML body (meta tags, hidden inputs).
+     * Try to extract a CSRF token from HTML body (meta tags). Returns null if not found
+     * or if no CSRF header name is configured.
      */
-    private void extractCsrfFromBody(String body) {
-        String csrfHeader = tokenStore.getCsrfHeaderName();
-        if (csrfHeader.isEmpty()) return;
+    private String extractCsrfFromBody(String body, String csrfHeader) {
+        if (csrfHeader.isEmpty()) return null;
 
         // Look for meta tag: <meta name="csrf-token" content="TOKEN_VALUE">
         Pattern metaPattern = Pattern.compile(
@@ -187,9 +200,8 @@ public class TokenCaptureHandler implements HttpHandler, ProxyResponseHandler {
                 Pattern.CASE_INSENSITIVE);
         Matcher metaMatcher = metaPattern.matcher(body);
         if (metaMatcher.find()) {
-            tokenStore.setCsrfValue(metaMatcher.group(1));
             api.logging().logToOutput("[Leader] Captured CSRF token from meta tag");
-            return;
+            return metaMatcher.group(1);
         }
 
         // Also check reversed attribute order: content before name
@@ -198,9 +210,10 @@ public class TokenCaptureHandler implements HttpHandler, ProxyResponseHandler {
                 Pattern.CASE_INSENSITIVE);
         Matcher metaMatcher2 = metaPattern2.matcher(body);
         if (metaMatcher2.find()) {
-            tokenStore.setCsrfValue(metaMatcher2.group(1));
             api.logging().logToOutput("[Leader] Captured CSRF token from meta tag (reversed)");
+            return metaMatcher2.group(1);
         }
+        return null;
     }
 
     // ==================== Token injection (leader auto-inject) ====================
@@ -208,34 +221,34 @@ public class TokenCaptureHandler implements HttpHandler, ProxyResponseHandler {
     /**
      * Inject stored tokens into an outgoing request. The leader uses this too,
      * so the leader's Burp and browser stay in sync with captured tokens.
+     *
+     * Reads a single atomic snapshot rather than each field separately, so a request never
+     * mixes a fresh field with a stale one from a capture that lands mid-build.
      */
     private HttpRequest injectTokens(HttpRequest request) {
         HttpRequest modified = request;
+        TokenStore.Snapshot snapshot = tokenStore.getSnapshot();
 
         // Inject cookies
-        String cookieString = tokenStore.getCookieString();
-        if (!cookieString.isEmpty()) {
+        if (!snapshot.cookieString.isEmpty()) {
             modified = modified.withRemovedHeader("Cookie")
-                    .withAddedHeader("Cookie", cookieString);
+                    .withAddedHeader("Cookie", snapshot.cookieString);
         }
 
         // Inject JWT
-        String jwt = tokenStore.getJwt();
-        if (jwt != null && !jwt.isEmpty()) {
+        if (snapshot.jwt != null && !snapshot.jwt.isEmpty()) {
             modified = modified.withRemovedHeader("Authorization")
-                    .withAddedHeader("Authorization", "Bearer " + jwt);
+                    .withAddedHeader("Authorization", "Bearer " + snapshot.jwt);
         }
 
         // Inject CSRF token
-        String csrfHeader = tokenStore.getCsrfHeaderName();
-        String csrfValue = tokenStore.getCsrfValue();
-        if (!csrfHeader.isEmpty() && !csrfValue.isEmpty()) {
-            modified = modified.withRemovedHeader(csrfHeader)
-                    .withAddedHeader(csrfHeader, csrfValue);
+        if (!snapshot.csrfHeaderName.isEmpty() && !snapshot.csrfValue.isEmpty()) {
+            modified = modified.withRemovedHeader(snapshot.csrfHeaderName)
+                    .withAddedHeader(snapshot.csrfHeaderName, snapshot.csrfValue);
         }
 
         // Inject custom headers
-        for (Map.Entry<String, String> entry : tokenStore.getCustomHeaders().entrySet()) {
+        for (Map.Entry<String, String> entry : snapshot.customHeaders.entrySet()) {
             modified = modified.withRemovedHeader(entry.getKey())
                     .withAddedHeader(entry.getKey(), entry.getValue());
         }

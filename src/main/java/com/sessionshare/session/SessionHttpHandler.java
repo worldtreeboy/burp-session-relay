@@ -88,34 +88,34 @@ public class SessionHttpHandler implements HttpHandler {
 
     // ==================== Token injection ====================
 
+    /**
+     * Reads a single atomic snapshot rather than each field separately, so a request never
+     * mixes a fresh field with a stale one from a capture that lands mid-build.
+     */
     private HttpRequest injectTokens(HttpRequest request) {
         HttpRequest modified = request;
+        TokenStore.Snapshot snapshot = tokenStore.getSnapshot();
 
         // Cookies
-        String cookieString = tokenStore.getCookieString();
-        if (!cookieString.isEmpty()) {
+        if (!snapshot.cookieString.isEmpty()) {
             modified = modified.withRemovedHeader("Cookie")
-                    .withAddedHeader("Cookie", cookieString);
+                    .withAddedHeader("Cookie", snapshot.cookieString);
         }
 
         // JWT as Bearer token
-        String jwt = tokenStore.getJwt();
-        if (jwt != null && !jwt.isEmpty()) {
+        if (snapshot.jwt != null && !snapshot.jwt.isEmpty()) {
             modified = modified.withRemovedHeader("Authorization")
-                    .withAddedHeader("Authorization", "Bearer " + jwt);
+                    .withAddedHeader("Authorization", "Bearer " + snapshot.jwt);
         }
 
         // CSRF token
-        String csrfHeader = tokenStore.getCsrfHeaderName();
-        String csrfValue = tokenStore.getCsrfValue();
-        if (csrfHeader != null && !csrfHeader.isEmpty()
-                && csrfValue != null && !csrfValue.isEmpty()) {
-            modified = modified.withRemovedHeader(csrfHeader)
-                    .withAddedHeader(csrfHeader, csrfValue);
+        if (!snapshot.csrfHeaderName.isEmpty() && !snapshot.csrfValue.isEmpty()) {
+            modified = modified.withRemovedHeader(snapshot.csrfHeaderName)
+                    .withAddedHeader(snapshot.csrfHeaderName, snapshot.csrfValue);
         }
 
         // Custom headers
-        for (Map.Entry<String, String> entry : tokenStore.getCustomHeaders().entrySet()) {
+        for (Map.Entry<String, String> entry : snapshot.customHeaders.entrySet()) {
             modified = modified.withRemovedHeader(entry.getKey())
                     .withAddedHeader(entry.getKey(), entry.getValue());
         }
@@ -125,8 +125,19 @@ public class SessionHttpHandler implements HttpHandler {
 
     // ==================== Token capture from responses ====================
 
+    /**
+     * Collects everything captured from this one response, then applies it to the token
+     * store as a single atomic batch — see TokenStore.applyCapturedResponse for why.
+     */
     private void captureTokensFromResponse(HttpResponseReceived response) {
         try {
+            Map<String, String> capturedCookies = new java.util.LinkedHashMap<>();
+            Map<String, String> capturedCustomHeaders = new java.util.LinkedHashMap<>();
+            String capturedJwt = null;
+            String capturedCsrf = null;
+
+            String csrfHeader = tokenStore.getCsrfHeaderName();
+
             for (var header : response.headers()) {
                 String name = header.name();
                 String value = header.value();
@@ -137,7 +148,7 @@ public class SessionHttpHandler implements HttpHandler {
                     String nameValue = parts[0].trim();
                     int eqIdx = nameValue.indexOf('=');
                     if (eqIdx > 0) {
-                        tokenStore.setCookie(
+                        capturedCookies.put(
                                 nameValue.substring(0, eqIdx).trim(),
                                 nameValue.substring(eqIdx + 1).trim());
                     }
@@ -148,20 +159,21 @@ public class SessionHttpHandler implements HttpHandler {
                         java.util.regex.Pattern.compile("eyJ[A-Za-z0-9_-]+\\.eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+")
                                 .matcher(value);
                 if (jwtMatcher.find()) {
-                    tokenStore.setJwt(jwtMatcher.group());
+                    capturedJwt = jwtMatcher.group();
                 }
 
                 // CSRF header
-                String csrfHeader = tokenStore.getCsrfHeaderName();
                 if (!csrfHeader.isEmpty() && csrfHeader.equalsIgnoreCase(name)) {
-                    tokenStore.setCsrfValue(value.trim());
+                    capturedCsrf = value.trim();
                 }
 
                 // Custom watched headers
                 if (tokenStore.isWatchedHeader(name)) {
-                    tokenStore.setCustomHeader(name, value.trim());
+                    capturedCustomHeaders.put(name, value.trim());
                 }
             }
+
+            tokenStore.applyCapturedResponse(capturedCookies, capturedJwt, capturedCsrf, capturedCustomHeaders);
         } catch (Exception e) {
             api.logging().logToError("[SessionManager] Error capturing tokens from response: " + e.getMessage());
         }

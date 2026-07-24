@@ -11,6 +11,8 @@ import com.sessionshare.model.TokenStore;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -273,9 +275,17 @@ public class SessionManager {
     }
 
     /**
-     * Extract cookies, JWTs, and CSRF tokens from the login macro response.
+     * Extract cookies, JWTs, and CSRF tokens from the login macro response, then apply them
+     * to the token store as a single atomic batch — see TokenStore.applyCapturedResponse for why.
      */
     private void extractTokensFromResponse(HttpResponse response) {
+        Map<String, String> capturedCookies = new LinkedHashMap<>();
+        Map<String, String> capturedCustomHeaders = new LinkedHashMap<>();
+        String capturedJwt = null;
+        String capturedCsrf = null;
+
+        String csrfHeader = tokenStore.getCsrfHeaderName();
+
         for (HttpHeader header : response.headers()) {
             String name = header.name();
             String value = header.value();
@@ -286,7 +296,7 @@ public class SessionManager {
                 String nameValue = parts[0].trim();
                 int eqIdx = nameValue.indexOf('=');
                 if (eqIdx > 0) {
-                    tokenStore.setCookie(
+                    capturedCookies.put(
                             nameValue.substring(0, eqIdx).trim(),
                             nameValue.substring(eqIdx + 1).trim());
                     api.logging().logToOutput("[SessionManager] Captured cookie: "
@@ -296,7 +306,7 @@ public class SessionManager {
                 // Check if cookie value itself is a JWT
                 Matcher jwtMatcher = JWT_PATTERN.matcher(value);
                 if (jwtMatcher.find()) {
-                    tokenStore.setJwt(jwtMatcher.group());
+                    capturedJwt = jwtMatcher.group();
                     api.logging().logToOutput("[SessionManager] Captured JWT from Set-Cookie");
                 }
             }
@@ -305,7 +315,7 @@ public class SessionManager {
             if ("Authorization".equalsIgnoreCase(name)) {
                 Matcher jwtMatcher = JWT_PATTERN.matcher(value);
                 if (jwtMatcher.find()) {
-                    tokenStore.setJwt(jwtMatcher.group());
+                    capturedJwt = jwtMatcher.group();
                     api.logging().logToOutput("[SessionManager] Captured JWT from Authorization header");
                 }
             }
@@ -314,20 +324,19 @@ public class SessionManager {
             Matcher jwtMatcher = JWT_PATTERN.matcher(value);
             if (jwtMatcher.find() && !"Set-Cookie".equalsIgnoreCase(name)
                     && !"Authorization".equalsIgnoreCase(name)) {
-                tokenStore.setJwt(jwtMatcher.group());
+                capturedJwt = jwtMatcher.group();
                 api.logging().logToOutput("[SessionManager] Captured JWT from header: " + name);
             }
 
             // CSRF token from configured header
-            String csrfHeader = tokenStore.getCsrfHeaderName();
             if (!csrfHeader.isEmpty() && csrfHeader.equalsIgnoreCase(name)) {
-                tokenStore.setCsrfValue(value.trim());
+                capturedCsrf = value.trim();
                 api.logging().logToOutput("[SessionManager] Captured CSRF from header: " + csrfHeader);
             }
 
             // Custom watched headers
             if (tokenStore.isWatchedHeader(name)) {
-                tokenStore.setCustomHeader(name, value.trim());
+                capturedCustomHeaders.put(name, value.trim());
                 api.logging().logToOutput("[SessionManager] Captured custom header: " + name);
             }
         }
@@ -338,22 +347,23 @@ public class SessionManager {
             // Look for JWT in body
             Matcher jwtMatcher = JWT_PATTERN.matcher(body);
             if (jwtMatcher.find()) {
-                tokenStore.setJwt(jwtMatcher.group());
+                capturedJwt = jwtMatcher.group();
                 api.logging().logToOutput("[SessionManager] Captured JWT from response body");
             }
 
             // Look for CSRF in meta tags
-            String csrfHeader = tokenStore.getCsrfHeaderName();
             if (!csrfHeader.isEmpty()) {
                 Pattern metaPattern = Pattern.compile(
                         "<meta[^>]+name=[\"'](?:csrf[_-]?token|_csrf|xsrf[_-]?token)[\"'][^>]+content=[\"']([^\"']+)[\"']",
                         Pattern.CASE_INSENSITIVE);
                 Matcher metaMatcher = metaPattern.matcher(body);
                 if (metaMatcher.find()) {
-                    tokenStore.setCsrfValue(metaMatcher.group(1));
+                    capturedCsrf = metaMatcher.group(1);
                     api.logging().logToOutput("[SessionManager] Captured CSRF from meta tag");
                 }
             }
         }
+
+        tokenStore.applyCapturedResponse(capturedCookies, capturedJwt, capturedCsrf, capturedCustomHeaders);
     }
 }

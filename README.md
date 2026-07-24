@@ -157,6 +157,8 @@ Extra Headers:  X-CSRF-Token: abc123
 | **CSRF** | Configured header name, meta tags in HTML | Configured header on requests |
 | **Custom Headers** | User-defined header names (via `[+]` button) | Matching headers on requests |
 
+Some apps bind two of these together (e.g. a session cookie plus a device/session-binding header, or a nonce tied to a specific cookie) — if the pair ever gets split across two different points in time, requests fail even though each field individually looks valid. Capture and injection both read/write every field as a single atomic snapshot (one lock acquisition), so a request is never built from a mix of a fresh field and a stale one.
+
 ## JWT Scanner
 
 The extension includes a passive JWT security check (read-only traffic analysis — it never sends forged requests).

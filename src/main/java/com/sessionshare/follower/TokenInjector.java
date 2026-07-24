@@ -70,35 +70,35 @@ public class TokenInjector implements HttpHandler {
 
     /**
      * Inject cookies, JWT, and CSRF tokens into the outgoing request.
+     *
+     * Reads a single atomic snapshot rather than each field separately — otherwise a poll
+     * update landing mid-build could pair a fresh cookie with a stale custom header (or vice
+     * versa), which breaks apps that bind the two together.
      */
     private HttpRequest injectTokens(HttpRequest request) {
         HttpRequest modified = request;
+        TokenStore.Snapshot snapshot = tokenStore.getSnapshot();
 
         // Inject cookies
-        String cookieString = tokenStore.getCookieString();
-        if (!cookieString.isEmpty()) {
+        if (!snapshot.cookieString.isEmpty()) {
             modified = modified.withRemovedHeader("Cookie")
-                    .withAddedHeader("Cookie", cookieString);
+                    .withAddedHeader("Cookie", snapshot.cookieString);
         }
 
         // Inject JWT as Bearer token
-        String jwt = tokenStore.getJwt();
-        if (jwt != null && !jwt.isEmpty()) {
+        if (snapshot.jwt != null && !snapshot.jwt.isEmpty()) {
             modified = modified.withRemovedHeader("Authorization")
-                    .withAddedHeader("Authorization", "Bearer " + jwt);
+                    .withAddedHeader("Authorization", "Bearer " + snapshot.jwt);
         }
 
         // Inject CSRF token
-        String csrfHeader = tokenStore.getCsrfHeaderName();
-        String csrfValue = tokenStore.getCsrfValue();
-        if (csrfHeader != null && !csrfHeader.isEmpty()
-                && csrfValue != null && !csrfValue.isEmpty()) {
-            modified = modified.withRemovedHeader(csrfHeader)
-                    .withAddedHeader(csrfHeader, csrfValue);
+        if (!snapshot.csrfHeaderName.isEmpty() && !snapshot.csrfValue.isEmpty()) {
+            modified = modified.withRemovedHeader(snapshot.csrfHeaderName)
+                    .withAddedHeader(snapshot.csrfHeaderName, snapshot.csrfValue);
         }
 
         // Inject custom headers
-        for (Map.Entry<String, String> entry : tokenStore.getCustomHeaders().entrySet()) {
+        for (Map.Entry<String, String> entry : snapshot.customHeaders.entrySet()) {
             modified = modified.withRemovedHeader(entry.getKey())
                     .withAddedHeader(entry.getKey(), entry.getValue());
         }

@@ -46,68 +46,32 @@ public class TokenStore {
 
     // --- Cookies ---
 
-    public void setCookie(String name, String value) {
-        lock.writeLock().lock();
-        try {
-            cookies.put(name, value);
-            updatedAt = Instant.now();
-        } finally {
-            lock.writeLock().unlock();
-        }
-    }
-
-    public void setCookies(Map<String, String> newCookies) {
-        lock.writeLock().lock();
-        try {
-            cookies.clear();
-            cookies.putAll(newCookies);
-            updatedAt = Instant.now();
-        } finally {
-            lock.writeLock().unlock();
-        }
-    }
-
-    public Map<String, String> getCookies() {
-        lock.readLock().lock();
-        try {
-            return Collections.unmodifiableMap(new ConcurrentHashMap<>(cookies));
-        } finally {
-            lock.readLock().unlock();
-        }
-    }
-
     /**
      * Build a Cookie header string: "name1=value1; name2=value2"
      */
     public String getCookieString() {
         lock.readLock().lock();
         try {
-            if (cookies.isEmpty()) return "";
-            StringBuilder sb = new StringBuilder();
-            for (Map.Entry<String, String> entry : cookies.entrySet()) {
-                if (sb.length() > 0) sb.append("; ");
-                sb.append(entry.getKey()).append("=").append(entry.getValue());
-            }
-            return sb.toString();
+            return buildCookieString();
         } finally {
             lock.readLock().unlock();
         }
+    }
+
+    private String buildCookieString() {
+        if (cookies.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, String> entry : cookies.entrySet()) {
+            if (sb.length() > 0) sb.append("; ");
+            sb.append(entry.getKey()).append("=").append(entry.getValue());
+        }
+        return sb.toString();
     }
 
     // --- JWT ---
 
     public String getJwt() {
         return jwt;
-    }
-
-    public void setJwt(String jwt) {
-        lock.writeLock().lock();
-        try {
-            this.jwt = jwt;
-            updatedAt = Instant.now();
-        } finally {
-            lock.writeLock().unlock();
-        }
     }
 
     // --- CSRF ---
@@ -122,16 +86,6 @@ public class TokenStore {
 
     public String getCsrfValue() {
         return csrfValue;
-    }
-
-    public void setCsrfValue(String csrfValue) {
-        lock.writeLock().lock();
-        try {
-            this.csrfValue = csrfValue;
-            updatedAt = Instant.now();
-        } finally {
-            lock.writeLock().unlock();
-        }
     }
 
     // --- Custom Headers ---
@@ -180,39 +134,76 @@ public class TokenStore {
         return false;
     }
 
+    // --- Atomic snapshot / batch apply ---
+    //
+    // Some apps bind a cookie and a header together (a session-binding header, a nonce tied
+    // to a specific cookie, etc.) — if the two are ever read or written a moment apart, a
+    // request can go out with a fresh cookie paired with a stale header (or vice versa), which
+    // looks like nothing's wrong but fails auth. Snapshot/applyCapturedResponse read or write
+    // every field under a single lock acquisition so that never happens.
+
     /**
-     * Set a custom header value (captured from traffic or fetched from leader).
+     * Immutable, consistent view of everything needed to build one outgoing request.
      */
-    public void setCustomHeader(String headerName, String value) {
-        lock.writeLock().lock();
-        try {
-            customHeaders.put(headerName, value);
-            updatedAt = Instant.now();
-        } finally {
-            lock.writeLock().unlock();
+    public static final class Snapshot {
+        public final String cookieString;
+        public final String jwt;
+        public final String csrfHeaderName;
+        public final String csrfValue;
+        public final Map<String, String> customHeaders;
+
+        private Snapshot(String cookieString, String jwt, String csrfHeaderName,
+                          String csrfValue, Map<String, String> customHeaders) {
+            this.cookieString = cookieString;
+            this.jwt = jwt;
+            this.csrfHeaderName = csrfHeaderName;
+            this.csrfValue = csrfValue;
+            this.customHeaders = customHeaders;
         }
     }
 
     /**
-     * Get all custom headers (name -> value).
+     * Read every field needed for request injection in one atomic snapshot.
      */
-    public Map<String, String> getCustomHeaders() {
+    public Snapshot getSnapshot() {
         lock.readLock().lock();
         try {
-            return Collections.unmodifiableMap(new ConcurrentHashMap<>(customHeaders));
+            return new Snapshot(
+                    buildCookieString(),
+                    jwt,
+                    csrfHeaderName,
+                    csrfValue,
+                    Collections.unmodifiableMap(new java.util.LinkedHashMap<>(customHeaders)));
         } finally {
             lock.readLock().unlock();
         }
     }
 
     /**
-     * Replace all custom headers at once (used by follower when deserializing from leader).
+     * Atomically apply everything captured from a single response/exchange. New cookies and
+     * custom headers are merged into the existing sets; JWT/CSRF are overwritten only if a new
+     * value was actually found in this exchange. All under one write-lock acquisition, so a
+     * concurrent reader (a follower's poll response, or a request being built for injection)
+     * never observes a partial update — either the whole batch from this exchange is visible, or
+     * none of it is.
      */
-    public void setCustomHeaders(Map<String, String> headers) {
+    public void applyCapturedResponse(Map<String, String> newCookies, String newJwt,
+                                       String newCsrfValue, Map<String, String> newCustomHeaders) {
+        boolean hasCookies = newCookies != null && !newCookies.isEmpty();
+        boolean hasJwt = newJwt != null && !newJwt.isEmpty();
+        boolean hasCsrf = newCsrfValue != null && !newCsrfValue.isEmpty();
+        boolean hasCustomHeaders = newCustomHeaders != null && !newCustomHeaders.isEmpty();
+
+        if (!hasCookies && !hasJwt && !hasCsrf && !hasCustomHeaders) {
+            return;
+        }
+
         lock.writeLock().lock();
         try {
-            customHeaders.clear();
-            customHeaders.putAll(headers);
+            if (hasCookies) cookies.putAll(newCookies);
+            if (hasJwt) this.jwt = newJwt;
+            if (hasCsrf) this.csrfValue = newCsrfValue;
+            if (hasCustomHeaders) customHeaders.putAll(newCustomHeaders);
             updatedAt = Instant.now();
         } finally {
             lock.writeLock().unlock();
