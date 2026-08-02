@@ -5,6 +5,7 @@ import burp.api.montoya.http.handler.*;
 import burp.api.montoya.http.message.requests.HttpRequest;
 
 import com.sessionshare.model.TokenStore;
+import com.sessionshare.util.ScopeMatcher;
 
 import java.util.Map;
 
@@ -75,7 +76,9 @@ public class SessionHttpHandler implements HttpHandler {
         if (statusCode == 401 || statusCode == 403) {
             api.logging().logToOutput("[SessionManager] Got HTTP " + statusCode
                     + " from " + url + " — triggering session refresh");
-            Thread.ofVirtual().start(() -> sessionManager.refreshSession());
+            Thread refreshThread = new Thread(sessionManager::refreshSession, "SessionShare-session-refresh");
+            refreshThread.setDaemon(true);
+            refreshThread.start();
         }
 
         // ---- Capture tokens from response (standalone mode support) ----
@@ -185,13 +188,6 @@ public class SessionHttpHandler implements HttpHandler {
         String target = tokenStore.getTarget();
         if (target == null || target.isEmpty()) return false;
 
-        String[] domains = target.split(",");
-        for (String domain : domains) {
-            domain = domain.trim().toLowerCase();
-            if (!domain.isEmpty() && url.toLowerCase().contains(domain)) {
-                return true;
-            }
-        }
-        return false;
+        return ScopeMatcher.matchesUrl(url, target);
     }
 }

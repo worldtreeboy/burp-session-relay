@@ -57,6 +57,9 @@ public class TokenServer {
             return;
         }
 
+        if (password == null || password.isBlank()) {
+            throw new IllegalArgumentException("A password is required");
+        }
         serverSocket = new ServerSocket(port, 50);
         executor = Executors.newFixedThreadPool(5);
         running = true;

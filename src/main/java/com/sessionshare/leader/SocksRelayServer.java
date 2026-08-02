@@ -16,6 +16,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import com.sessionshare.util.ScopeMatcher;
 
 /**
  * Minimal SOCKS5 relay server (RFC 1928 CONNECT command + RFC 1929 username/password auth).
@@ -52,6 +53,7 @@ public class SocksRelayServer {
     private ExecutorService executor;
     private volatile boolean running = false;
     private volatile String password = "";
+    private volatile String allowedScope = "";
     private final AtomicInteger activeConnections = new AtomicInteger(0);
     private final AtomicLong totalConnections = new AtomicLong(0);
 
@@ -61,6 +63,10 @@ public class SocksRelayServer {
 
     public void setPassword(String password) {
         this.password = password == null ? "" : password;
+    }
+
+    public void setAllowedScope(String allowedScope) {
+        this.allowedScope = allowedScope == null ? "" : allowedScope;
     }
 
     public boolean isRunning() {
@@ -84,6 +90,8 @@ public class SocksRelayServer {
             return;
         }
 
+        if (password.isBlank()) throw new IllegalArgumentException("A password is required for SOCKS relay");
+        if (allowedScope.isBlank()) throw new IllegalArgumentException("Target scope is required for SOCKS relay");
         serverSocket = new ServerSocket(port, 50);
         executor = Executors.newCachedThreadPool();
         running = true;
@@ -155,6 +163,12 @@ public class SocksRelayServer {
 
             String host = dest[0];
             int port = Integer.parseInt(dest[1]);
+
+            if (!ScopeMatcher.matchesHost(host, allowedScope)) {
+                api.logging().logToError("[SOCKS] Blocked out-of-scope destination " + host + ":" + port);
+                sendConnectReply(out, REPLY_HOST_UNREACHABLE);
+                return;
+            }
 
             try {
                 target = new Socket();

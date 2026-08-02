@@ -7,6 +7,7 @@ import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.proxy.http.*;
 
 import com.sessionshare.model.TokenStore;
+import com.sessionshare.util.ScopeMatcher;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -265,14 +266,6 @@ public class TokenCaptureHandler implements HttpHandler, ProxyResponseHandler {
         String target = tokenStore.getTarget();
         if (target == null || target.isEmpty()) return false;
 
-        // Support comma-separated list of domains
-        String[] domains = target.split(",");
-        for (String domain : domains) {
-            domain = domain.trim().toLowerCase();
-            if (!domain.isEmpty() && url.toLowerCase().contains(domain)) {
-                return true;
-            }
-        }
-        return false;
+        return ScopeMatcher.matchesUrl(url, target);
     }
 }

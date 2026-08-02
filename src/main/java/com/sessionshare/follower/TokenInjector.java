@@ -5,6 +5,7 @@ import burp.api.montoya.http.handler.*;
 import burp.api.montoya.http.message.requests.HttpRequest;
 
 import com.sessionshare.model.TokenStore;
+import com.sessionshare.util.ScopeMatcher;
 
 import java.util.Map;
 
@@ -61,7 +62,9 @@ public class TokenInjector implements HttpHandler {
                 api.logging().logToOutput("[Follower] Got " + statusCode
                         + " — triggering immediate token refresh");
                 // Run the poll on a background thread to avoid blocking Burp
-                Thread.ofVirtual().start(() -> poller.poll());
+                Thread refreshThread = new Thread(poller::poll, "SessionShare-immediate-poll");
+                refreshThread.setDaemon(true);
+                refreshThread.start();
             }
         }
 
@@ -113,13 +116,6 @@ public class TokenInjector implements HttpHandler {
         String target = tokenStore.getTarget();
         if (target == null || target.isEmpty()) return false;
 
-        String[] domains = target.split(",");
-        for (String domain : domains) {
-            domain = domain.trim().toLowerCase();
-            if (!domain.isEmpty() && url.toLowerCase().contains(domain)) {
-                return true;
-            }
-        }
-        return false;
+        return ScopeMatcher.matchesUrl(url, target);
     }
 }

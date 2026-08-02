@@ -247,7 +247,8 @@ public class TokenStore {
             TokenPayload payload = GSON.fromJson(json, TokenPayload.class);
             if (payload == null) return;
 
-            if (payload.target != null) this.target = payload.target;
+            // Scope is a local security boundary. Never let a remote leader change where
+            // this follower injects credentials.
             if (payload.cookies != null) {
                 this.cookies.clear();
                 this.cookies.putAll(payload.cookies);

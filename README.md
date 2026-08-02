@@ -1,5 +1,7 @@
 # Burp Session Share
 
+Current release: **v1.60**
+
 A Burp Suite extension (Montoya API) that lets a penetration testing team share session tokens across multiple Burp instances over the LAN — plus a built-in **Session Manager** that auto-refreshes expired tokens during active scans.
 
 When a team shares a single user account on a target application, keeping everyone authenticated is a pain. This extension solves that with a **Leader / Follower** model — one person maintains the session, everyone else stays in sync automatically.
@@ -40,12 +42,37 @@ Token sharing keeps everyone authenticated, but it doesn't get anyone's packets 
 
 - The leader checks **Enable** under **SOCKS5 Relay** in the Leader Configuration panel and sets a port (default: `1080`), then clicks **Start Server** (this starts the token server and the SOCKS relay together).
 - The relay is a minimal SOCKS5 server (RFC 1928, `CONNECT` only) gated with username/password auth (RFC 1929) using the same **Password** field as the token server. Domain names are resolved on the leader's machine (remote DNS), which is what makes split-DNS VPNs work correctly.
-- Each follower sets Burp's own **Project options → Connections → SOCKS Proxy** to the leader's IP and SOCKS port, with any username and the shared password. From then on, that follower's Burp — proxied traffic, active/passive scans, Repeater, everything — routes through the leader's machine.
+- For domain-selective routing, the follower starts its local routing service and points Burp's SOCKS setting to `127.0.0.1`. The follower sends matching Target Scope domains through the leader and connects to other destinations directly.
 
 ### What it does *not* do
 
-- It only relays traffic that Burp itself sends. A phone or other device's raw (non-Burp) traffic isn't proxy-aware and won't be touched by this — that would need OS-level routing/NAT or a local SOCKS-aware redirector on whatever device sits between the phone and the leader, which is outside what a Burp extension can do.
-- It's not scoped to the target domain — anyone with the password can relay a connection to any host reachable from the leader's machine. Treat the password with the same care as the token-server password; this is a trusted-LAN pentest tool, not internet-facing infrastructure.
+- A phone must use the follower's Burp listener as its HTTP/HTTPS proxy. The extension does not provide transparent OS-level routing or NAT for traffic that bypasses Burp.
+- The relay only permits destinations matching the configured Target Scope. It still carries sensitive traffic and credentials, so use it only on a trusted LAN and keep the password private.
+
+## Phone → Follower → Leader Domain Routing
+
+The follower includes a loopback-only selective SOCKS proxy. This supports the following flow while keeping interception on the follower:
+
+```
+Phone → follower Burp proxy → 127.0.0.1 selective SOCKS → leader SOCKS/VPN → target
+Phone ← follower Burp proxy ← 127.0.0.1 selective SOCKS ← leader SOCKS/VPN ← target
+```
+
+Only hosts in **Target Scope** are forwarded through the leader. Other hosts connect directly from the follower. Target Scope accepts comma-separated domains and wildcards, for example:
+
+```
+example.com, *.internal.example.com, login.partner.test
+```
+
+Setup:
+
+1. On the leader, enable **SOCKS5 Relay**, choose its port, enter a non-empty password and Target Scope, then start the server.
+2. On the follower, enter Leader IP, the same password and Target Scope. Set **Leader SOCKS port** to the leader's relay port and choose a free **Local port** (default `1081`).
+3. Click **Start Domain Routing**.
+4. In the follower's Burp network settings, set the SOCKS proxy to `127.0.0.1:1081`, select SOCKS5, leave authentication empty, and enable DNS resolution through SOCKS.
+5. Configure the phone to use the follower laptop's Burp listener as its HTTP/HTTPS proxy as usual.
+
+DNS-over-SOCKS is required because domain-selective routing needs the original hostname. If Burp resolves a hostname to an IP before SOCKS, the extension cannot safely determine which configured domain it belongs to and the leader will reject it.
 
 ## Session Manager (Auto-Refresh)
 
@@ -216,7 +243,8 @@ The JAR will be at `build/libs/session-share.jar`.
 5. Set the **Target Scope** to match the leader's
 6. Click **Connect**
 7. Tokens are now auto-injected into your requests
-8. If the leader enabled the SOCKS5 Relay and you need their VPN route too, set Burp's **Project options → Connections → SOCKS Proxy** to the leader's IP and SOCKS port, with the same password
+8. For selective route sharing, enter the leader SOCKS port and a local port, then click **Start Domain Routing**
+9. Set Burp's SOCKS5 proxy to `127.0.0.1` and that local port, with DNS resolution through SOCKS enabled
 
 ### Solo Use (Session Manager only)
 
@@ -267,3 +295,17 @@ src/main/java/com/sessionshare/
 ## Security Note
 
 This is a **pentest team coordination tool** for use on trusted networks during engagements. The password is a simple shared secret sent as an HTTP header — it is not designed for internet-facing security.
+
+## v1.60
+
+- Added phone → follower Burp → leader/VPN → target routing.
+- Added a dedicated **Start Domain Routing** / **Stop Domain Routing** control on followers.
+- Added multiple-domain and wildcard routing scopes.
+- Added hostname-safe scope matching to prevent lookalike-domain token leakage.
+- Added a loopback-only selective SOCKS5 proxy on followers; non-target traffic connects directly.
+- Restricted the leader SOCKS relay to configured target domains.
+- Required non-empty passwords for network-facing token and SOCKS services.
+- Prevented remote token payloads from overwriting a follower's local security scope.
+- Made Leader and Follower runtime roles mutually exclusive.
+- Restored real Java 17 compatibility and enforced it during compilation.
+- Added automated scope-matching regression tests.

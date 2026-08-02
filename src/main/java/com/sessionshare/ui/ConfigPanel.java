@@ -3,6 +3,7 @@ package com.sessionshare.ui;
 import burp.api.montoya.MontoyaApi;
 import com.sessionshare.follower.TokenInjector;
 import com.sessionshare.follower.TokenPoller;
+import com.sessionshare.follower.SelectiveSocksProxy;
 import com.sessionshare.leader.SocksRelayServer;
 import com.sessionshare.leader.TokenCaptureHandler;
 import com.sessionshare.leader.TokenServer;
@@ -33,6 +34,7 @@ public class ConfigPanel extends JPanel {
     private final TokenCaptureHandler captureHandler;
     private final TokenPoller tokenPoller;
     private final TokenInjector tokenInjector;
+    private final SelectiveSocksProxy selectiveSocksProxy;
     private final SessionManager sessionManager;
 
     // Role selection
@@ -63,6 +65,10 @@ public class ConfigPanel extends JPanel {
     private JPasswordField followerPasswordField;
     private JTextField followerPollIntervalField;
     private JTextField followerTargetField;
+    private JTextField followerLeaderSocksPortField;
+    private JTextField followerLocalSocksPortField;
+    private JButton followerRoutingButton;
+    private JLabel followerRoutingStatusLabel;
     private JButton followerConnectButton;
     private JLabel followerStatusLabel;
     private JTextArea followerTokenDisplay;
@@ -88,6 +94,7 @@ public class ConfigPanel extends JPanel {
                        TokenServer tokenServer, SocksRelayServer socksRelayServer,
                        TokenCaptureHandler captureHandler,
                        TokenPoller tokenPoller, TokenInjector tokenInjector,
+                       SelectiveSocksProxy selectiveSocksProxy,
                        SessionManager sessionManager) {
         this.api = api;
         this.tokenStore = tokenStore;
@@ -96,6 +103,7 @@ public class ConfigPanel extends JPanel {
         this.captureHandler = captureHandler;
         this.tokenPoller = tokenPoller;
         this.tokenInjector = tokenInjector;
+        this.selectiveSocksProxy = selectiveSocksProxy;
         this.sessionManager = sessionManager;
 
         setLayout(new BorderLayout(10, 10));
@@ -147,6 +155,24 @@ public class ConfigPanel extends JPanel {
     }
 
     private void switchRole(String role) {
+        if ("leader".equals(role)) {
+            if (tokenPoller.isConnected()) tokenPoller.stop();
+            tokenInjector.setActive(false);
+            selectiveSocksProxy.stop();
+            followerConnectButton.setText("Connect");
+            followerRoutingButton.setText("Start Domain Routing");
+            followerStatusLabel.setText("Status: Disconnected");
+            followerRoutingStatusLabel.setText("Routing: Stopped");
+            setFollowerFieldsEnabled(true);
+        } else {
+            if (tokenServer.isRunning()) tokenServer.stop();
+            if (socksRelayServer.isRunning()) socksRelayServer.stop();
+            captureHandler.setActive(false);
+            leaderStartStopButton.setText("Start Server");
+            leaderStatusLabel.setText("Status: Stopped");
+            socksStatusLabel.setText("SOCKS: stopped");
+            setLeaderFieldsEnabled(true);
+        }
         cardLayout.show(cardPanel, role);
     }
 
@@ -400,6 +426,7 @@ public class ConfigPanel extends JPanel {
                     try {
                         int socksPort = Integer.parseInt(socksPortField.getText().trim());
                         socksRelayServer.setPassword(password);
+                        socksRelayServer.setAllowedScope(target);
                         socksRelayServer.start(socksPort);
                         socksStatusLabel.setText("SOCKS: running on port " + socksPort);
                         socksStatusLabel.setForeground(new Color(0, 128, 0));
@@ -485,9 +512,35 @@ public class ConfigPanel extends JPanel {
         gbc.gridx = 0; gbc.gridy = row;
         configPanel.add(new JLabel("Target Scope:"), gbc);
         followerTargetField = new JTextField("example.com", 25);
-        followerTargetField.setToolTipText("Comma-separated domains to inject tokens into");
+        followerTargetField.setToolTipText("Comma-separated domains; wildcards supported (example.com, *.internal.test)");
         gbc.gridx = 1;
         configPanel.add(followerTargetField, gbc);
+
+        row++;
+        gbc.gridx = 0; gbc.gridy = row;
+        configPanel.add(new JLabel("Domain Routing:"), gbc);
+        JPanel routingFields = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        followerLeaderSocksPortField = new JTextField("1080", 6);
+        followerLocalSocksPortField = new JTextField("1081", 6);
+        routingFields.add(new JLabel("Leader SOCKS port:"));
+        routingFields.add(followerLeaderSocksPortField);
+        routingFields.add(new JLabel("Local port:"));
+        routingFields.add(followerLocalSocksPortField);
+        gbc.gridx = 1;
+        configPanel.add(routingFields, gbc);
+
+        row++;
+        gbc.gridx = 0; gbc.gridy = row; gbc.gridwidth = 2;
+        JPanel routingButtons = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        followerRoutingButton = new JButton("Start Domain Routing");
+        followerRoutingButton.addActionListener(e -> toggleDomainRouting());
+        routingButtons.add(followerRoutingButton);
+        routingButtons.add(Box.createHorizontalStrut(15));
+        followerRoutingStatusLabel = new JLabel("Routing: Stopped");
+        followerRoutingStatusLabel.setForeground(Color.GRAY);
+        routingButtons.add(followerRoutingStatusLabel);
+        configPanel.add(routingButtons, gbc);
+        gbc.gridwidth = 1;
 
         row++;
         gbc.gridx = 0; gbc.gridy = row; gbc.gridwidth = 2;
@@ -504,9 +557,9 @@ public class ConfigPanel extends JPanel {
 
         row++;
         gbc.gridx = 0; gbc.gridy = row; gbc.gridwidth = 2;
-        JLabel socksHintLabel = new JLabel("<html><i>Want this Burp's own traffic (scans, Repeater, etc.) to go through the "
-                + "leader's VPN too?<br>Enable the leader's SOCKS5 Relay, then set Project options &rarr; Connections "
-                + "&rarr; SOCKS Proxy<br>to the leader's IP and SOCKS port here, with the same password as username/password.</i></html>");
+        JLabel socksHintLabel = new JLabel("<html><i>Phone &rarr; follower Burp &rarr; local selective SOCKS &rarr; leader/VPN &rarr; target.<br>"
+                + "In Burp, set SOCKS proxy to 127.0.0.1 and the Local port above, enable DNS over SOCKS.<br>"
+                + "Only Target Scope domains use the leader; all other destinations connect directly.</i></html>");
         socksHintLabel.setForeground(Color.GRAY);
         configPanel.add(socksHintLabel, gbc);
         gbc.gridwidth = 1;
@@ -584,6 +637,38 @@ public class ConfigPanel extends JPanel {
         followerPasswordField.setEnabled(enabled);
         followerPollIntervalField.setEnabled(enabled);
         followerTargetField.setEnabled(enabled);
+    }
+
+    private void toggleDomainRouting() {
+        if (selectiveSocksProxy.isRunning()) {
+            selectiveSocksProxy.stop();
+            followerRoutingButton.setText("Start Domain Routing");
+            followerRoutingStatusLabel.setText("Routing: Stopped");
+            followerRoutingStatusLabel.setForeground(Color.GRAY);
+            return;
+        }
+        try {
+            String leaderIp = followerIpField.getText().trim();
+            String password = new String(followerPasswordField.getPassword());
+            String target = followerTargetField.getText().trim();
+            int leaderSocksPort = Integer.parseInt(followerLeaderSocksPortField.getText().trim());
+            int localPort = Integer.parseInt(followerLocalSocksPortField.getText().trim());
+            validatePort(leaderSocksPort);
+            validatePort(localPort);
+            selectiveSocksProxy.start(localPort, leaderIp, leaderSocksPort, password, target);
+            followerRoutingButton.setText("Stop Domain Routing");
+            followerRoutingStatusLabel.setText("Routing: 127.0.0.1:" + localPort
+                    + " | target via " + leaderIp + ":" + leaderSocksPort);
+            followerRoutingStatusLabel.setForeground(new Color(0, 128, 0));
+        } catch (Exception ex) {
+            followerRoutingStatusLabel.setText("Routing: Error — " + ex.getMessage());
+            followerRoutingStatusLabel.setForeground(Color.RED);
+            api.logging().logToError("[Selective SOCKS] Start failed: " + ex.getMessage());
+        }
+    }
+
+    private static void validatePort(int port) {
+        if (port < 1 || port > 65535) throw new IllegalArgumentException("Port must be 1-65535");
     }
 
     // ==================== Session Manager panel (always visible) ====================
@@ -815,7 +900,7 @@ public class ConfigPanel extends JPanel {
         smTestButton.setText("Testing...");
 
         // Run on background thread to avoid blocking EDT
-        Thread.ofVirtual().start(() -> {
+        Thread testThread = new Thread(() -> {
             try {
                 // Temporarily apply config for testing
                 applySessionManagerConfig();
@@ -851,7 +936,9 @@ public class ConfigPanel extends JPanel {
                             "Test Login Macro", JOptionPane.ERROR_MESSAGE);
                 });
             }
-        });
+        }, "SessionShare-login-test");
+        testThread.setDaemon(true);
+        testThread.start();
     }
 
     /**
@@ -868,7 +955,7 @@ public class ConfigPanel extends JPanel {
         smRefreshNowButton.setEnabled(false);
         smRefreshNowButton.setText("Refreshing...");
 
-        Thread.ofVirtual().start(() -> {
+        Thread refreshThread = new Thread(() -> {
             boolean success = sessionManager.refreshSession();
             SwingUtilities.invokeLater(() -> {
                 smRefreshNowButton.setEnabled(true);
@@ -878,7 +965,9 @@ public class ConfigPanel extends JPanel {
                 smStatusLabel.setText("Status: " + sessionManager.getLastRefreshStatus());
                 smStatusLabel.setForeground(success ? new Color(0, 128, 0) : Color.RED);
             });
-        });
+        }, "SessionShare-manual-refresh");
+        refreshThread.setDaemon(true);
+        refreshThread.start();
     }
 
     private void setSessionManagerFieldsEnabled(boolean enabled) {

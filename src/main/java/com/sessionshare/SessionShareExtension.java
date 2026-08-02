@@ -5,6 +5,7 @@ import burp.api.montoya.MontoyaApi;
 
 import com.sessionshare.follower.TokenInjector;
 import com.sessionshare.follower.TokenPoller;
+import com.sessionshare.follower.SelectiveSocksProxy;
 import com.sessionshare.leader.SocksRelayServer;
 import com.sessionshare.leader.TokenCaptureHandler;
 import com.sessionshare.leader.TokenServer;
@@ -28,12 +29,15 @@ import com.sessionshare.ui.ConfigPanel;
  */
 public class SessionShareExtension implements BurpExtension {
 
+    private static final String VERSION = "1.60";
+
     private TokenStore tokenStore;
     private TokenServer tokenServer;
     private SocksRelayServer socksRelayServer;
     private TokenCaptureHandler captureHandler;
     private TokenPoller tokenPoller;
     private TokenInjector tokenInjector;
+    private SelectiveSocksProxy selectiveSocksProxy;
     private SessionManager sessionManager;
     private SessionHttpHandler sessionHttpHandler;
     private ConfigPanel configPanel;
@@ -41,7 +45,7 @@ public class SessionShareExtension implements BurpExtension {
     @Override
     public void initialize(MontoyaApi api) {
         api.extension().setName("Session Share");
-        api.logging().logToOutput("Session Share v1.1 loading...");
+        api.logging().logToOutput("Session Share v" + VERSION + " loading...");
 
         // 1. Core model — thread-safe token storage
         tokenStore = new TokenStore();
@@ -54,6 +58,7 @@ public class SessionShareExtension implements BurpExtension {
         // 3. Follower components
         tokenPoller = new TokenPoller(api, tokenStore);
         tokenInjector = new TokenInjector(api, tokenStore, tokenPoller);
+        selectiveSocksProxy = new SelectiveSocksProxy(api);
 
         // 4. Session Manager (works independently of leader/follower)
         sessionManager = new SessionManager(api, tokenStore);
@@ -72,7 +77,7 @@ public class SessionShareExtension implements BurpExtension {
 
         // 8. Build and register the UI tab
         configPanel = new ConfigPanel(api, tokenStore, tokenServer, socksRelayServer, captureHandler,
-                tokenPoller, tokenInjector, sessionManager);
+                tokenPoller, tokenInjector, selectiveSocksProxy, sessionManager);
         api.userInterface().registerSuiteTab("Session Share", configPanel);
 
         // 9. Cleanup on extension unload
@@ -87,6 +92,7 @@ public class SessionShareExtension implements BurpExtension {
             // Stop follower polling
             tokenPoller.stop();
             tokenInjector.setActive(false);
+            selectiveSocksProxy.stop();
 
             // Disable session manager
             sessionManager.setEnabled(false);
@@ -97,7 +103,7 @@ public class SessionShareExtension implements BurpExtension {
             api.logging().logToOutput("Session Share unloaded.");
         });
 
-        api.logging().logToOutput("Session Share v1.1 loaded successfully.");
+        api.logging().logToOutput("Session Share v" + VERSION + " loaded successfully.");
         api.logging().logToOutput("Select Leader or Follower mode, and/or enable Session Manager in the Session Share tab.");
     }
 }
