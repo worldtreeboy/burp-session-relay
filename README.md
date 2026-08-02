@@ -1,6 +1,6 @@
 # Burp Session Share
 
-Current release: **v1.60**
+Current release: **v1.2.2**
 
 A Burp Suite extension (Montoya API) that lets a penetration testing team share session tokens across multiple Burp instances over the LAN — plus a built-in **Session Manager** that auto-refreshes expired tokens during active scans.
 
@@ -296,7 +296,7 @@ src/main/java/com/sessionshare/
 
 This is a **pentest team coordination tool** for use on trusted networks during engagements. The password is a simple shared secret sent as an HTTP header — it is not designed for internet-facing security.
 
-## v1.60
+## v1.2.2
 
 - Added phone → follower Burp → leader/VPN → target routing.
 - Added a dedicated **Start Domain Routing** / **Stop Domain Routing** control on followers.

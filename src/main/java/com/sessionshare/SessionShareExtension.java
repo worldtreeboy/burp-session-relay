@@ -29,7 +29,7 @@ import com.sessionshare.ui.ConfigPanel;
  */
 public class SessionShareExtension implements BurpExtension {
 
-    private static final String VERSION = "1.60";
+    private static final String VERSION = "1.2.2";
 
     private TokenStore tokenStore;
     private TokenServer tokenServer;
