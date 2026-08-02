@@ -1,6 +1,6 @@
 # Burp Session Share
 
-Current release: **v1.2.2**
+Current release: **v1.2.3**
 
 A Burp Suite extension (Montoya API) that lets a penetration testing team share session tokens across multiple Burp instances over the LAN — plus a built-in **Session Manager** that auto-refreshes expired tokens during active scans.
 
@@ -63,6 +63,8 @@ Only hosts in **Target Scope** are forwarded through the leader. Other hosts con
 ```
 example.com, *.internal.example.com, login.partner.test
 ```
+
+Use **+ Add Domain** to append targets. Use **Route All (*)** on both leader and follower to route every domain through the leader; this also broadens token injection to every hostname, so enable it only intentionally.
 
 Setup:
 
@@ -295,6 +297,17 @@ src/main/java/com/sessionshare/
 ## Security Note
 
 This is a **pentest team coordination tool** for use on trusted networks during engagements. The password is a simple shared secret sent as an HTTP header — it is not designed for internet-facing security.
+
+## v1.2.3
+
+- Added **+ Add Domain** controls to Leader and Follower Target Scope fields.
+- Added **Route All (*)** controls for routing every domain through the leader/VPN.
+- Added wildcard-all scope matching with regression tests.
+- Prevented stored tokens from overwriting explicitly configured login-macro authentication.
+- Rate-limited failed session refresh attempts as well as successful refreshes.
+- Login macros now require a 2xx response containing session tokens before reporting success.
+- Fixed temporary login-test state restoration and empty-cookie deletion.
+- Replaced unbounded SOCKS worker pools with bounded pools.
 
 ## v1.2.2
 

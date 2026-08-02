@@ -40,7 +40,7 @@ public final class SelectiveSocksProxy {
         this.scope = scope;
         serverSocket = new ServerSocket();
         serverSocket.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), localPort), 50);
-        executor = Executors.newCachedThreadPool();
+        executor = Executors.newFixedThreadPool(32);
         running = true;
         executor.submit(this::acceptLoop);
         api.logging().logToOutput("[Selective SOCKS] Listening on 127.0.0.1:" + localPort);

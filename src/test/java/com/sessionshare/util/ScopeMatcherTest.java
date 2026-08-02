@@ -25,4 +25,9 @@ class ScopeMatcherTest {
     @Test void handlesCaseAndTrailingDot() {
         assertTrue(ScopeMatcher.matchesHost("API.EXAMPLE.COM.", "*.Example.Com."));
     }
+
+    @Test void supportsRouteAllWildcard() {
+        assertTrue(ScopeMatcher.matchesHost("anything.example", "*"));
+        assertTrue(ScopeMatcher.matchesUrl("https://unrelated.test/path", "*"));
+    }
 }

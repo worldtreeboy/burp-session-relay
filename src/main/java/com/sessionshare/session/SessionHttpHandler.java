@@ -38,6 +38,9 @@ public class SessionHttpHandler implements HttpHandler {
         if (!sessionManager.isEnabled()) {
             return RequestToBeSentAction.continueWith(request);
         }
+        if (tokenStore.shouldBypassInjection(request.url())) {
+            return RequestToBeSentAction.continueWith(request);
+        }
 
         if (!isInScope(request.url())) {
             return RequestToBeSentAction.continueWith(request);

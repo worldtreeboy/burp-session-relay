@@ -51,6 +51,9 @@ public class TokenCaptureHandler implements HttpHandler, ProxyResponseHandler {
         if (!active) {
             return RequestToBeSentAction.continueWith(request);
         }
+        if (tokenStore.shouldBypassInjection(request.url())) {
+            return RequestToBeSentAction.continueWith(request);
+        }
 
         // Leader also auto-injects tokens into its own requests (same as followers)
         if (!isInScope(request.url())) {

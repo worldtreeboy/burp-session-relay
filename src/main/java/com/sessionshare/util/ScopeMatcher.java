@@ -21,6 +21,7 @@ public final class ScopeMatcher {
         String normalizedHost = normalize(host);
         for (String configured : scope.split(",")) {
             String domain = normalize(configured);
+            if ("*".equals(domain)) return true;
             if (!domain.isEmpty()
                     && (normalizedHost.equals(domain) || normalizedHost.endsWith("." + domain))) {
                 return true;

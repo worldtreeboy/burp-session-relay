@@ -93,7 +93,7 @@ public class SocksRelayServer {
         if (password.isBlank()) throw new IllegalArgumentException("A password is required for SOCKS relay");
         if (allowedScope.isBlank()) throw new IllegalArgumentException("Target scope is required for SOCKS relay");
         serverSocket = new ServerSocket(port, 50);
-        executor = Executors.newCachedThreadPool();
+        executor = Executors.newFixedThreadPool(32);
         running = true;
 
         executor.submit(() -> {

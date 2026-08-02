@@ -39,6 +39,9 @@ public class TokenInjector implements HttpHandler {
         if (!active) {
             return RequestToBeSentAction.continueWith(request);
         }
+        if (tokenStore.shouldBypassInjection(request.url())) {
+            return RequestToBeSentAction.continueWith(request);
+        }
 
         // Only inject into requests that match the target scope
         if (!isInScope(request.url())) {

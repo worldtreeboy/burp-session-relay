@@ -46,7 +46,7 @@ public class SessionManager {
 
     // Prevent concurrent refreshes
     private final ReentrantLock refreshLock = new ReentrantLock();
-    private volatile long lastRefreshTimeMs = 0;
+    private volatile long lastRefreshAttemptTimeMs = 0;
     private static final long MIN_REFRESH_INTERVAL_MS = 5000; // 5 seconds between refreshes
 
     // Status tracking
@@ -174,7 +174,7 @@ public class SessionManager {
 
         // Rate limit: don't refresh more than once every 5 seconds
         long now = System.currentTimeMillis();
-        if ((now - lastRefreshTimeMs) < MIN_REFRESH_INTERVAL_MS) {
+        if ((now - lastRefreshAttemptTimeMs) < MIN_REFRESH_INTERVAL_MS) {
             api.logging().logToOutput("[SessionManager] Skipping refresh (rate limited)");
             return false;
         }
@@ -186,6 +186,7 @@ public class SessionManager {
         }
 
         try {
+            lastRefreshAttemptTimeMs = System.currentTimeMillis();
             api.logging().logToOutput("[SessionManager] Refreshing session via login macro: " + loginUrl);
 
             // Build the login request
@@ -196,14 +197,24 @@ public class SessionManager {
             }
 
             // Send the request through Burp
-            HttpResponse response = api.http().sendRequest(loginRequest).response();
+            tokenStore.beginLoginMacro(loginUrl);
+            HttpResponse response;
+            try {
+                response = api.http().sendRequest(loginRequest).response();
+            } finally {
+                tokenStore.endLoginMacro();
+            }
             int statusCode = response.statusCode();
             api.logging().logToOutput("[SessionManager] Login macro response: HTTP " + statusCode);
 
-            if (statusCode >= 200 && statusCode < 400) {
+            if (statusCode >= 200 && statusCode < 300) {
                 // Success — extract tokens from response
-                extractTokensFromResponse(response);
-                lastRefreshTimeMs = System.currentTimeMillis();
+                boolean capturedTokens = extractTokensFromResponse(response);
+                if (!capturedTokens) {
+                    lastRefreshStatus = "Failed: login returned HTTP " + statusCode + " but no session tokens";
+                    api.logging().logToError("[SessionManager] Login response contained no session tokens");
+                    return false;
+                }
                 refreshCount++;
                 lastRefreshStatus = "OK (HTTP " + statusCode + ") at " + Instant.now();
                 api.logging().logToOutput("[SessionManager] Session refreshed successfully. Total refreshes: " + refreshCount);
@@ -278,7 +289,7 @@ public class SessionManager {
      * Extract cookies, JWTs, and CSRF tokens from the login macro response, then apply them
      * to the token store as a single atomic batch — see TokenStore.applyCapturedResponse for why.
      */
-    private void extractTokensFromResponse(HttpResponse response) {
+    private boolean extractTokensFromResponse(HttpResponse response) {
         Map<String, String> capturedCookies = new LinkedHashMap<>();
         Map<String, String> capturedCustomHeaders = new LinkedHashMap<>();
         String capturedJwt = null;
@@ -365,5 +376,7 @@ public class SessionManager {
         }
 
         tokenStore.applyCapturedResponse(capturedCookies, capturedJwt, capturedCsrf, capturedCustomHeaders);
+        return !capturedCookies.isEmpty() || capturedJwt != null || capturedCsrf != null
+                || !capturedCustomHeaders.isEmpty();
     }
 }

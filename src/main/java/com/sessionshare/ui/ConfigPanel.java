@@ -228,9 +228,17 @@ public class ConfigPanel extends JPanel {
         gbc.gridx = 0; gbc.gridy = row;
         configPanel.add(new JLabel("Target Scope:"), gbc);
         leaderTargetField = new JTextField("example.com", 25);
-        leaderTargetField.setToolTipText("Comma-separated domains to capture tokens from");
+        leaderTargetField.setToolTipText("Multiple comma-separated domains; wildcards supported");
+        JPanel leaderScopePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        leaderScopePanel.add(leaderTargetField);
+        JButton leaderAddDomainButton = new JButton("+ Add Domain");
+        leaderAddDomainButton.addActionListener(e -> addDomainToScope(leaderTargetField));
+        leaderScopePanel.add(leaderAddDomainButton);
+        JButton leaderRouteAllButton = new JButton("Route All (*)");
+        leaderRouteAllButton.addActionListener(e -> setRouteAllScope(leaderTargetField));
+        leaderScopePanel.add(leaderRouteAllButton);
         gbc.gridx = 1;
-        configPanel.add(leaderTargetField, gbc);
+        configPanel.add(leaderScopePanel, gbc);
 
         // CSRF header name
         row++;
@@ -247,10 +255,7 @@ public class ConfigPanel extends JPanel {
         configPanel.add(new JLabel("SOCKS5 Relay:"), gbc);
         JPanel socksRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
         socksEnabledCheckbox = new JCheckBox("Enable");
-        socksEnabledCheckbox.setToolTipText("<html>Starts a SOCKS5 proxy alongside the token server. Followers point their own<br>"
-                + "Burp's upstream SOCKS proxy (Project options &rarr; Connections) at this leader,<br>"
-                + "so their Burp traffic is relayed through this machine — including any VPN<br>"
-                + "route this machine has. Uses the same password above (as SOCKS username/password auth).</html>");
+        socksEnabledCheckbox.setToolTipText("Starts the scoped SOCKS5 relay used by followers to access this machine's VPN route.");
         socksPortField = new JTextField("1080", 6);
         socksRow.add(socksEnabledCheckbox);
         socksRow.add(new JLabel("Port:"));
@@ -355,7 +360,7 @@ public class ConfigPanel extends JPanel {
         btnPanel.add(addBtn);
         btnPanel.add(removeBtn);
         btnPanel.add(Box.createHorizontalStrut(8));
-        btnPanel.add(new JLabel("<html><i>e.g. X-Api-Key, X-Request-Id</i></html>"));
+        btnPanel.add(new JLabel("Example: X-Api-Key, X-Request-Id"));
 
         panel.add(btnPanel, BorderLayout.SOUTH);
 
@@ -513,8 +518,16 @@ public class ConfigPanel extends JPanel {
         configPanel.add(new JLabel("Target Scope:"), gbc);
         followerTargetField = new JTextField("example.com", 25);
         followerTargetField.setToolTipText("Comma-separated domains; wildcards supported (example.com, *.internal.test)");
+        JPanel followerScopePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        followerScopePanel.add(followerTargetField);
+        JButton followerAddDomainButton = new JButton("+ Add Domain");
+        followerAddDomainButton.addActionListener(e -> addDomainToScope(followerTargetField));
+        followerScopePanel.add(followerAddDomainButton);
+        JButton followerRouteAllButton = new JButton("Route All (*)");
+        followerRouteAllButton.addActionListener(e -> setRouteAllScope(followerTargetField));
+        followerScopePanel.add(followerRouteAllButton);
         gbc.gridx = 1;
-        configPanel.add(followerTargetField, gbc);
+        configPanel.add(followerScopePanel, gbc);
 
         row++;
         gbc.gridx = 0; gbc.gridy = row;
@@ -557,9 +570,7 @@ public class ConfigPanel extends JPanel {
 
         row++;
         gbc.gridx = 0; gbc.gridy = row; gbc.gridwidth = 2;
-        JLabel socksHintLabel = new JLabel("<html><i>Phone &rarr; follower Burp &rarr; local selective SOCKS &rarr; leader/VPN &rarr; target.<br>"
-                + "In Burp, set SOCKS proxy to 127.0.0.1 and the Local port above, enable DNS over SOCKS.<br>"
-                + "Only Target Scope domains use the leader; all other destinations connect directly.</i></html>");
+        JLabel socksHintLabel = new JLabel("Phone -> follower Burp -> local SOCKS -> leader/VPN -> target. Set Burp SOCKS to 127.0.0.1 and enable DNS over SOCKS.");
         socksHintLabel.setForeground(Color.GRAY);
         configPanel.add(socksHintLabel, gbc);
         gbc.gridwidth = 1;
@@ -671,6 +682,31 @@ public class ConfigPanel extends JPanel {
         if (port < 1 || port > 65535) throw new IllegalArgumentException("Port must be 1-65535");
     }
 
+    private void addDomainToScope(JTextField scopeField) {
+        String domain = JOptionPane.showInputDialog(this,
+                "Enter a domain or wildcard (for example: api.example.com or *.internal.test):",
+                "Add Target Domain", JOptionPane.PLAIN_MESSAGE);
+        if (domain == null) return;
+        domain = domain.trim();
+        if (domain.isEmpty() || domain.contains(",") || domain.contains(":") || domain.contains("/")) {
+            JOptionPane.showMessageDialog(this, "Enter one hostname or wildcard without a scheme, path, or port.",
+                    "Invalid Domain", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        String current = scopeField.getText().trim();
+        for (String existing : current.split(",")) {
+            if (existing.trim().equalsIgnoreCase(domain)) return;
+        }
+        scopeField.setText(current.isEmpty() ? domain : current + ", " + domain);
+    }
+
+    private void setRouteAllScope(JTextField scopeField) {
+        int choice = JOptionPane.showConfirmDialog(this,
+                "Route and inject tokens for every domain?\n\nOnly use this when you intentionally want all Burp traffic to use the leader.",
+                "Route All Domains", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (choice == JOptionPane.YES_OPTION) scopeField.setText("*");
+    }
+
     // ==================== Session Manager panel (always visible) ====================
 
     /**
@@ -758,7 +794,7 @@ public class ConfigPanel extends JPanel {
         // Extra headers
         row++;
         gbc.gridx = 0; gbc.gridy = row; gbc.anchor = GridBagConstraints.NORTHWEST;
-        configPanel.add(new JLabel("<html>Extra<br>Headers:</html>"), gbc);
+        configPanel.add(new JLabel("Extra Headers:"), gbc);
         gbc.gridx = 1; gbc.fill = GridBagConstraints.BOTH; gbc.weightx = 1.0; gbc.weighty = 0.3;
         smExtraHeadersArea = new JTextArea(2, 40);
         smExtraHeadersArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
@@ -807,7 +843,7 @@ public class ConfigPanel extends JPanel {
 
         infoPanel.add(new JLabel("|"));
 
-        JLabel helpLabel = new JLabel("<html><i>Tip: Set Target Scope in Leader/Follower config first</i></html>");
+        JLabel helpLabel = new JLabel("Tip: Set Target Scope in Leader/Follower config first");
         helpLabel.setForeground(Color.GRAY);
         infoPanel.add(helpLabel);
 
@@ -901,13 +937,12 @@ public class ConfigPanel extends JPanel {
 
         // Run on background thread to avoid blocking EDT
         Thread testThread = new Thread(() -> {
+            boolean wasEnabled = sessionManager.isEnabled();
             try {
                 // Temporarily apply config for testing
                 applySessionManagerConfig();
-                boolean wasEnabled = sessionManager.isEnabled();
                 sessionManager.setEnabled(true);
                 boolean success = sessionManager.refreshSession();
-                sessionManager.setEnabled(wasEnabled);
 
                 String status = sessionManager.getLastRefreshStatus();
 
@@ -935,6 +970,8 @@ public class ConfigPanel extends JPanel {
                             "Error: " + ex.getMessage(),
                             "Test Login Macro", JOptionPane.ERROR_MESSAGE);
                 });
+            } finally {
+                sessionManager.setEnabled(wasEnabled);
             }
         }, "SessionShare-login-test");
         testThread.setDaemon(true);

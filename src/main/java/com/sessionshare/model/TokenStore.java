@@ -25,6 +25,8 @@ public class TokenStore {
     private volatile String csrfValue = "";
     private volatile String target = "";
     private volatile Instant updatedAt = Instant.now();
+    private volatile boolean loginMacroInProgress = false;
+    private volatile String loginMacroUrl = "";
 
     // Custom headers: header name -> captured value
     // The leader configures which header names to watch; values are captured from traffic.
@@ -42,6 +44,19 @@ public class TokenStore {
 
     public void setTarget(String target) {
         this.target = target;
+    }
+
+    public void beginLoginMacro(String url) {
+        loginMacroUrl = url == null ? "" : url;
+        loginMacroInProgress = true;
+    }
+
+    public void endLoginMacro() {
+        loginMacroInProgress = false;
+    }
+
+    public boolean shouldBypassInjection(String url) {
+        return loginMacroInProgress && loginMacroUrl.equals(url);
     }
 
     // --- Cookies ---
@@ -200,7 +215,12 @@ public class TokenStore {
 
         lock.writeLock().lock();
         try {
-            if (hasCookies) cookies.putAll(newCookies);
+            if (hasCookies) {
+                for (Map.Entry<String, String> cookie : newCookies.entrySet()) {
+                    if (cookie.getValue() == null || cookie.getValue().isEmpty()) cookies.remove(cookie.getKey());
+                    else cookies.put(cookie.getKey(), cookie.getValue());
+                }
+            }
             if (hasJwt) this.jwt = newJwt;
             if (hasCsrf) this.csrfValue = newCsrfValue;
             if (hasCustomHeaders) customHeaders.putAll(newCustomHeaders);
