@@ -209,8 +209,8 @@ JWT scanner findings show up in Burp's **Dashboard** (Issues tab) and **Target â
 ### Build from source
 
 ```bash
-git clone https://github.com/worldtreeboy/burp-session-share.git
-cd burp-session-share
+git clone https://github.com/worldtreeboy/burp-session-relay.git
+cd burp-session-relay
 ./gradlew shadowJar
 ```
 
