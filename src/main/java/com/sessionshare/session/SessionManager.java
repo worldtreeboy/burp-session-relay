@@ -7,6 +7,7 @@ import burp.api.montoya.http.message.responses.HttpResponse;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.sessionshare.model.TokenStore;
+import com.sessionshare.util.SetCookieParser;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -303,15 +304,11 @@ public class SessionManager {
 
             // Set-Cookie headers → store cookies
             if ("Set-Cookie".equalsIgnoreCase(name)) {
-                String[] parts = value.split(";", 2);
-                String nameValue = parts[0].trim();
-                int eqIdx = nameValue.indexOf('=');
-                if (eqIdx > 0) {
-                    capturedCookies.put(
-                            nameValue.substring(0, eqIdx).trim(),
-                            nameValue.substring(eqIdx + 1).trim());
-                    api.logging().logToOutput("[SessionManager] Captured cookie: "
-                            + nameValue.substring(0, eqIdx).trim());
+                SetCookieParser.ParsedCookie cookie = SetCookieParser.parse(value, Instant.now());
+                if (cookie != null) {
+                    capturedCookies.put(cookie.name(), cookie.value());
+                    api.logging().logToOutput("[SessionManager] "
+                            + (cookie.deleted() ? "Deleted" : "Captured") + " cookie: " + cookie.name());
                 }
 
                 // Check if cookie value itself is a JWT

@@ -1072,7 +1072,8 @@ public class ConfigPanel extends JPanel {
                         }
                         String error = tokenPoller.getLastError();
                         if (!error.isEmpty()) {
-                            status = "Status: Error — " + error;
+                            status = "Status: Error — " + error + " | Consecutive failures: "
+                                    + tokenPoller.getConsecutiveFailures();
                             followerStatusLabel.setForeground(Color.ORANGE);
                         } else {
                             followerStatusLabel.setForeground(new Color(0, 128, 0));

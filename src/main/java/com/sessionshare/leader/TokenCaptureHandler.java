@@ -8,6 +8,8 @@ import burp.api.montoya.proxy.http.*;
 
 import com.sessionshare.model.TokenStore;
 import com.sessionshare.util.ScopeMatcher;
+import com.sessionshare.util.SetCookieParser;
+import java.time.Instant;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -171,15 +173,11 @@ public class TokenCaptureHandler implements HttpHandler, ProxyResponseHandler {
         if (setCookieValue == null || setCookieValue.isEmpty()) return null;
 
         // The cookie name=value is the first part before any ";"
-        String[] parts = setCookieValue.split(";", 2);
-        String nameValue = parts[0].trim();
-
-        int equalsIndex = nameValue.indexOf('=');
-        if (equalsIndex > 0) {
-            String cookieName = nameValue.substring(0, equalsIndex).trim();
-            String cookieValue = nameValue.substring(equalsIndex + 1).trim();
-            capturedCookies.put(cookieName, cookieValue);
-            api.logging().logToOutput("[Leader] Captured cookie: " + cookieName);
+        SetCookieParser.ParsedCookie cookie = SetCookieParser.parse(setCookieValue, Instant.now());
+        if (cookie != null) {
+            capturedCookies.put(cookie.name(), cookie.value());
+            api.logging().logToOutput("[Leader] " + (cookie.deleted() ? "Deleted" : "Captured")
+                    + " cookie: " + cookie.name());
         }
 
         // Check if the cookie value itself is a JWT

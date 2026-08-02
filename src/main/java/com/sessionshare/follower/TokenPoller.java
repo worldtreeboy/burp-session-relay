@@ -12,6 +12,7 @@ import java.time.Instant;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Follower-side background thread that periodically polls the leader's
@@ -26,6 +27,8 @@ public class TokenPoller {
     private volatile boolean connected = false;
     private volatile Instant lastFetchTime;
     private volatile String lastError = "";
+    private final AtomicBoolean pollInProgress = new AtomicBoolean(false);
+    private volatile int consecutiveFailures = 0;
 
     private String leaderIp = "127.0.0.1";
     private int leaderPort = 8888;
@@ -69,6 +72,8 @@ public class TokenPoller {
         return lastError;
     }
 
+    public int getConsecutiveFailures() { return consecutiveFailures; }
+
     /**
      * Start polling the leader's server on a background thread.
      */
@@ -81,9 +86,10 @@ public class TokenPoller {
             return t;
         });
 
-        scheduler.scheduleAtFixedRate(this::poll, 0, pollIntervalSeconds, TimeUnit.SECONDS);
         connected = true;
         lastError = "";
+        consecutiveFailures = 0;
+        scheduler.scheduleAtFixedRate(this::poll, 0, pollIntervalSeconds, TimeUnit.SECONDS);
         api.logging().logToOutput("[Follower] Started polling " + leaderIp + ":" + leaderPort
                 + " every " + pollIntervalSeconds + "s");
     }
@@ -105,6 +111,7 @@ public class TokenPoller {
      * Can also be called on-demand (e.g., on 401/403 response).
      */
     public void poll() {
+        if (!connected || !pollInProgress.compareAndSet(false, true)) return;
         HttpURLConnection conn = null;
         try {
             URL url = new URL("http://" + leaderIp + ":" + leaderPort + "/tokens");
@@ -135,22 +142,27 @@ public class TokenPoller {
                 tokenStore.fromJson(response.toString());
                 lastFetchTime = Instant.now();
                 lastError = "";
+                consecutiveFailures = 0;
 
                 api.logging().logToOutput("[Follower] Fetched tokens successfully at " + lastFetchTime);
             } else if (responseCode == 401) {
                 lastError = "Authentication failed (wrong password)";
+                consecutiveFailures++;
                 api.logging().logToError("[Follower] 401 Unauthorized — check password");
             } else {
                 lastError = "HTTP " + responseCode;
+                consecutiveFailures++;
                 api.logging().logToError("[Follower] Unexpected response: " + responseCode);
             }
         } catch (Exception e) {
             lastError = e.getMessage();
+            consecutiveFailures++;
             api.logging().logToError("[Follower] Poll failed: " + e.getMessage());
         } finally {
             if (conn != null) {
                 conn.disconnect();
             }
+            pollInProgress.set(false);
         }
     }
 }

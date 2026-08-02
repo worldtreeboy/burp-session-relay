@@ -6,6 +6,8 @@ import burp.api.montoya.http.message.requests.HttpRequest;
 
 import com.sessionshare.model.TokenStore;
 import com.sessionshare.util.ScopeMatcher;
+import com.sessionshare.util.SetCookieParser;
+import java.time.Instant;
 
 import java.util.Map;
 
@@ -150,14 +152,8 @@ public class SessionHttpHandler implements HttpHandler {
 
                 // Set-Cookie
                 if ("Set-Cookie".equalsIgnoreCase(name)) {
-                    String[] parts = value.split(";", 2);
-                    String nameValue = parts[0].trim();
-                    int eqIdx = nameValue.indexOf('=');
-                    if (eqIdx > 0) {
-                        capturedCookies.put(
-                                nameValue.substring(0, eqIdx).trim(),
-                                nameValue.substring(eqIdx + 1).trim());
-                    }
+                    SetCookieParser.ParsedCookie cookie = SetCookieParser.parse(value, Instant.now());
+                    if (cookie != null) capturedCookies.put(cookie.name(), cookie.value());
                 }
 
                 // JWT from any header
