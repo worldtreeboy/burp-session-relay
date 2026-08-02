@@ -16,7 +16,7 @@ import com.sessionshare.session.SessionManager;
 import com.sessionshare.ui.ConfigPanel;
 
 /**
- * Session Share — Burp Suite extension for sharing session tokens across
+ * Burp Session Relay — Burp Suite extension for sharing session tokens and routes across
  * a penetration testing team on the same LAN.
  *
  * Architecture: Leader/Follower model + standalone Session Manager.
@@ -29,7 +29,7 @@ import com.sessionshare.ui.ConfigPanel;
  */
 public class SessionShareExtension implements BurpExtension {
 
-    private static final String VERSION = "1.2.3";
+    private static final String VERSION = "1.0";
 
     private TokenStore tokenStore;
     private TokenServer tokenServer;
@@ -44,8 +44,8 @@ public class SessionShareExtension implements BurpExtension {
 
     @Override
     public void initialize(MontoyaApi api) {
-        api.extension().setName("Session Share");
-        api.logging().logToOutput("Session Share v" + VERSION + " loading...");
+        api.extension().setName("Burp Session Relay");
+        api.logging().logToOutput("Burp Session Relay v" + VERSION + " loading...");
 
         // 1. Core model — thread-safe token storage
         tokenStore = new TokenStore();
@@ -78,11 +78,11 @@ public class SessionShareExtension implements BurpExtension {
         // 8. Build and register the UI tab
         configPanel = new ConfigPanel(api, tokenStore, tokenServer, socksRelayServer, captureHandler,
                 tokenPoller, tokenInjector, selectiveSocksProxy, sessionManager);
-        api.userInterface().registerSuiteTab("Session Share", configPanel);
+        api.userInterface().registerSuiteTab("Burp Session Relay", configPanel);
 
         // 9. Cleanup on extension unload
         api.extension().registerUnloadingHandler(() -> {
-            api.logging().logToOutput("Session Share unloading...");
+            api.logging().logToOutput("Burp Session Relay unloading...");
 
             // Stop leader server
             tokenServer.stop();
@@ -100,10 +100,10 @@ public class SessionShareExtension implements BurpExtension {
             // Stop UI refresh
             configPanel.stopUiRefresh();
 
-            api.logging().logToOutput("Session Share unloaded.");
+            api.logging().logToOutput("Burp Session Relay unloaded.");
         });
 
-        api.logging().logToOutput("Session Share v" + VERSION + " loaded successfully.");
-        api.logging().logToOutput("Select Leader or Follower mode, and/or enable Session Manager in the Session Share tab.");
+        api.logging().logToOutput("Burp Session Relay v" + VERSION + " loaded successfully.");
+        api.logging().logToOutput("Select Leader or Follower mode, and/or enable Session Manager in the Burp Session Relay tab.");
     }
 }

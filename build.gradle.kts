@@ -26,7 +26,7 @@ java {
 }
 
 tasks.shadowJar {
-    archiveBaseName.set("session-share")
+    archiveBaseName.set("burp-session-relay")
     archiveClassifier.set("")
     archiveVersion.set("")
 }

@@ -1,6 +1,6 @@
-# Burp Session Share
+# Burp Session Relay
 
-Current release: **v1.2.3**
+Current release: **v1.0**
 
 A Burp Suite extension (Montoya API) that lets a penetration testing team share session tokens across multiple Burp instances over the LAN — plus a built-in **Session Manager** that auto-refreshes expired tokens during active scans.
 
@@ -112,7 +112,7 @@ Without the Session Manager, a long active scan can lose its session mid-scan �
 
 ### Tab Layout
 
-The Session Manager panel sits at the **bottom half** of the Session Share tab, below the Leader/Follower cards. Drag the divider to resize.
+The Session Manager panel sits at the **bottom half** of the Burp Session Relay tab, below the Leader/Follower cards. Drag the divider to resize.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -202,7 +202,7 @@ The extension includes a passive JWT security check (read-only traffic analysis 
 
 ### Where do findings appear?
 
-JWT scanner findings show up in Burp's **Dashboard** (Issues tab) and **Target → Issues** — not in the Session Share extension tab. They appear alongside Burp's own findings with the severity and confidence levels shown above, and fire automatically as traffic flows through Burp's proxy.
+JWT scanner findings show up in Burp's **Dashboard** (Issues tab) and **Target → Issues** — not in the Burp Session Relay extension tab. They appear alongside Burp's own findings with the severity and confidence levels shown above, and fire automatically as traffic flows through Burp's proxy.
 
 ## Installation
 
@@ -214,20 +214,20 @@ cd burp-session-share
 ./gradlew shadowJar
 ```
 
-The JAR will be at `build/libs/session-share.jar`.
+The JAR will be at `build/libs/burp-session-relay.jar`.
 
 ### Load in Burp Suite
 
 1. Go to **Extensions** → **Add**
 2. Extension type: **Java**
-3. Select `session-share.jar`
-4. The **Session Share** tab will appear in Burp
+3. Select `burp-session-relay.jar`
+4. The **Burp Session Relay** tab will appear in Burp
 
 ## Usage
 
 ### Leader Setup
 
-1. Switch to the **Session Share** tab
+1. Switch to the **Burp Session Relay** tab
 2. Select **Leader** role
 3. Set the **Target Scope** to your target domain (e.g., `academy.hackthebox.com`)
 4. Set a **Password** (shared secret for LAN authentication)
@@ -238,7 +238,7 @@ The JAR will be at `build/libs/session-share.jar`.
 
 ### Follower Setup
 
-1. Switch to the **Session Share** tab
+1. Switch to the **Burp Session Relay** tab
 2. Select **Follower** role
 3. Enter the leader's **IP address** and **Port** (default: 8888)
 4. Enter the same **Password**
@@ -250,7 +250,7 @@ The JAR will be at `build/libs/session-share.jar`.
 
 ### Solo Use (Session Manager only)
 
-1. Switch to the **Session Share** tab
+1. Switch to the **Burp Session Relay** tab
 2. Set the **Target Scope** in either Leader or Follower config (no need to start server or connect)
 3. Configure the **Login Macro** in the Session Manager panel at the bottom
 4. Click **Test Login Macro** to verify it works
@@ -298,27 +298,8 @@ src/main/java/com/sessionshare/
 
 This is a **pentest team coordination tool** for use on trusted networks during engagements. The password is a simple shared secret sent as an HTTP header — it is not designed for internet-facing security.
 
-## v1.2.3
+## v1.0
 
-- Added **+ Add Domain** controls to Leader and Follower Target Scope fields.
-- Added **Route All (*)** controls for routing every domain through the leader/VPN.
-- Added wildcard-all scope matching with regression tests.
-- Prevented stored tokens from overwriting explicitly configured login-macro authentication.
-- Rate-limited failed session refresh attempts as well as successful refreshes.
-- Login macros now require a 2xx response containing session tokens before reporting success.
-- Fixed temporary login-test state restoration and empty-cookie deletion.
-- Replaced unbounded SOCKS worker pools with bounded pools.
-
-## v1.2.2
-
-- Added phone → follower Burp → leader/VPN → target routing.
-- Added a dedicated **Start Domain Routing** / **Stop Domain Routing** control on followers.
-- Added multiple-domain and wildcard routing scopes.
-- Added hostname-safe scope matching to prevent lookalike-domain token leakage.
-- Added a loopback-only selective SOCKS5 proxy on followers; non-target traffic connects directly.
-- Restricted the leader SOCKS relay to configured target domains.
-- Required non-empty passwords for network-facing token and SOCKS services.
-- Prevented remote token payloads from overwriting a follower's local security scope.
-- Made Leader and Follower runtime roles mutually exclusive.
-- Restored real Java 17 compatibility and enforced it during compilation.
-- Added automated scope-matching regression tests.
+The first Burp Session Relay release includes session-token synchronization, Leader/Follower roles,
+domain-selective routing through the leader's VPN, phone and local-tool proxy support, multiple and
+wildcard domains, Route All mode, session auto-refresh, scoped SOCKS5 relaying, and Java 17 support.

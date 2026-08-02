@@ -21,7 +21,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Swing-based UI tab for the Session Share extension.
+ * Swing-based UI tab for the Burp Session Relay extension.
  * Provides role selection (Leader/Follower) and mode-specific controls,
  * plus an always-visible Session Manager panel for auto-refresh.
  */

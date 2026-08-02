@@ -1,1 +1,1 @@
-rootProject.name = "session-share"
+rootProject.name = "burp-session-relay"
