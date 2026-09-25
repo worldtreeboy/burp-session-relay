@@ -190,6 +190,7 @@ public class SessionManager {
             lastRefreshAttemptTimeMs = System.currentTimeMillis();
             api.logging().logToOutput("[SessionManager] Refreshing session via login macro: " + loginUrl);
 
+            String expectedTarget = tokenStore.getTarget();
             // Build the login request
             HttpRequest loginRequest = buildLoginRequest();
             if (loginRequest == null) {
@@ -210,10 +211,10 @@ public class SessionManager {
 
             if (statusCode >= 200 && statusCode < 300) {
                 // Success — extract tokens from response
-                boolean capturedTokens = extractTokensFromResponse(response);
+                boolean capturedTokens = extractTokensFromResponse(response, expectedTarget);
                 if (!capturedTokens) {
-                    lastRefreshStatus = "Failed: login returned HTTP " + statusCode + " but no session tokens";
-                    api.logging().logToError("[SessionManager] Login response contained no session tokens");
+                    lastRefreshStatus = "Failed: login returned HTTP " + statusCode + " but no session tokens were accepted";
+                    api.logging().logToError("[SessionManager] Login response had no eligible session tokens; the target may have changed");
                     return false;
                 }
                 refreshCount++;
@@ -273,7 +274,7 @@ public class SessionManager {
 
             // Inject current cookies into login request
             // (some apps require an existing session cookie for re-login)
-            String cookieString = tokenStore.getCookieString();
+            String cookieString = tokenStore.getCookieStringForUrl(request.url());
             if (!cookieString.isEmpty()) {
                 request = request.withRemovedHeader("Cookie")
                         .withAddedHeader("Cookie", cookieString);
@@ -290,7 +291,7 @@ public class SessionManager {
      * Extract cookies, JWTs, and CSRF tokens from the login macro response, then apply them
      * to the token store as a single atomic batch — see TokenStore.applyCapturedResponse for why.
      */
-    private boolean extractTokensFromResponse(HttpResponse response) {
+    private boolean extractTokensFromResponse(HttpResponse response, String expectedTarget) {
         Map<String, String> capturedCookies = new LinkedHashMap<>();
         Map<String, String> capturedCustomHeaders = new LinkedHashMap<>();
         String capturedJwt = null;
@@ -372,8 +373,9 @@ public class SessionManager {
             }
         }
 
-        tokenStore.applyCapturedResponse(capturedCookies, capturedJwt, capturedCsrf, capturedCustomHeaders);
-        return !capturedCookies.isEmpty() || capturedJwt != null || capturedCsrf != null
-                || !capturedCustomHeaders.isEmpty();
+        boolean accepted = tokenStore.applyLoginResponseForTarget(expectedTarget, capturedCookies,
+                capturedJwt, capturedCsrf, capturedCustomHeaders);
+        return accepted && (!capturedCookies.isEmpty() || capturedJwt != null || capturedCsrf != null
+                || !capturedCustomHeaders.isEmpty());
     }
 }

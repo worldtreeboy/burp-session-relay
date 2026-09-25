@@ -12,8 +12,14 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import com.sessionshare.util.ScopeMatcher;
@@ -34,7 +40,6 @@ import com.sessionshare.util.ScopeMatcher;
 public class SocksRelayServer {
 
     private static final byte SOCKS_VERSION = 0x05;
-    private static final byte AUTH_NONE = 0x00;
     private static final byte AUTH_USER_PASS = 0x02;
     private static final byte AUTH_NO_ACCEPTABLE = (byte) 0xFF;
     private static final byte CMD_CONNECT = 0x01;
@@ -54,6 +59,7 @@ public class SocksRelayServer {
     private volatile boolean running = false;
     private volatile String password = "";
     private volatile String allowedScope = "";
+    private final Set<Socket> openSockets = ConcurrentHashMap.newKeySet();
     private final AtomicInteger activeConnections = new AtomicInteger(0);
     private final AtomicLong totalConnections = new AtomicLong(0);
 
@@ -84,24 +90,47 @@ public class SocksRelayServer {
     /**
      * Start the SOCKS5 relay on the given port. Binds to 0.0.0.0 so followers on the LAN can connect.
      */
-    public void start(int port) throws IOException {
+    public synchronized void start(int port) throws IOException {
+        start(port, null);
+    }
+
+    // Allows loopback-only integration checks without exposing a test listener to the LAN.
+    synchronized void start(int port, InetAddress bindAddress) throws IOException {
         if (running) {
             api.logging().logToOutput("[SOCKS] Already running.");
             return;
         }
 
         if (password.isBlank()) throw new IllegalArgumentException("A password is required for SOCKS relay");
+        if (password.getBytes(StandardCharsets.UTF_8).length > 255) {
+            throw new IllegalArgumentException("SOCKS password must be at most 255 UTF-8 bytes");
+        }
         if (allowedScope.isBlank()) throw new IllegalArgumentException("Target scope is required for SOCKS relay");
-        serverSocket = new ServerSocket(port, 50);
-        executor = Executors.newFixedThreadPool(32);
+        serverSocket = new ServerSocket(port, 50, bindAddress);
+        ServerSocket listener = serverSocket;
+        executor = new ThreadPoolExecutor(32, 32, 0, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(64), runnable -> {
+                    Thread thread = new Thread(runnable, "SessionShare-SocksRelay");
+                    thread.setDaemon(true);
+                    return thread;
+                });
+        ExecutorService workers = executor;
         running = true;
 
         executor.submit(() -> {
             api.logging().logToOutput("[SOCKS] Accept loop started on port " + port);
-            while (running && !serverSocket.isClosed()) {
+            while (!listener.isClosed()) {
                 try {
-                    Socket client = serverSocket.accept();
-                    executor.submit(() -> handleClient(client));
+                    Socket client = listener.accept();
+                    synchronized (this) {
+                        if (!track(client, listener)) continue;
+                        try {
+                            workers.execute(() -> handleClient(client, listener));
+                        } catch (RejectedExecutionException e) {
+                            openSockets.remove(client);
+                            closeQuietly(client);
+                        }
+                    }
                 } catch (SocketException e) {
                     // Expected when serverSocket.close() is called during shutdown
                     if (running) {
@@ -122,7 +151,7 @@ public class SocksRelayServer {
     /**
      * Stop the relay and release resources. Active relayed connections are force-closed.
      */
-    public void stop() {
+    public synchronized void stop() {
         if (!running) return;
         running = false;
 
@@ -137,13 +166,15 @@ public class SocksRelayServer {
         if (executor != null) {
             executor.shutdownNow();
         }
+        for (Socket socket : openSockets) closeQuietly(socket);
+        openSockets.clear();
 
         api.logging().logToOutput("[SOCKS] Stopped.");
     }
 
     // ==================== Per-connection handling ====================
 
-    private void handleClient(Socket client) {
+    private void handleClient(Socket client, ServerSocket listener) {
         Socket target = null;
         totalConnections.incrementAndGet();
         activeConnections.incrementAndGet();
@@ -172,6 +203,7 @@ public class SocksRelayServer {
 
             try {
                 target = new Socket();
+                if (!track(target, listener)) return;
                 target.connect(new InetSocketAddress(host, port), 10_000);
             } catch (Exception e) {
                 api.logging().logToError("[SOCKS] Connect failed to " + host + ":" + port + " — " + e.getMessage());
@@ -194,6 +226,8 @@ public class SocksRelayServer {
             activeConnections.decrementAndGet();
             closeQuietly(client);
             closeQuietly(target);
+            openSockets.remove(client);
+            if (target != null) openSockets.remove(target);
         }
     }
 
@@ -216,20 +250,14 @@ public class SocksRelayServer {
             if (m == AUTH_USER_PASS) offersUserPass = true;
         }
 
-        if (password != null && !password.isEmpty()) {
-            if (!offersUserPass) {
-                out.write(new byte[]{SOCKS_VERSION, AUTH_NO_ACCEPTABLE});
-                out.flush();
-                return false;
-            }
-            out.write(new byte[]{SOCKS_VERSION, AUTH_USER_PASS});
+        if (password.isBlank() || !offersUserPass) {
+            out.write(new byte[]{SOCKS_VERSION, AUTH_NO_ACCEPTABLE});
             out.flush();
-            return doUserPassAuth(in, out, client);
-        } else {
-            out.write(new byte[]{SOCKS_VERSION, AUTH_NONE});
-            out.flush();
-            return true;
+            return false;
         }
+        out.write(new byte[]{SOCKS_VERSION, AUTH_USER_PASS});
+        out.flush();
+        return doUserPassAuth(in, out, client);
     }
 
     /**
@@ -250,8 +278,9 @@ public class SocksRelayServer {
         int plen = readByte(in);
         byte[] passwd = readFully(in, plen);
 
-        String suppliedPassword = new String(passwd, StandardCharsets.UTF_8);
-        boolean ok = password.equals(suppliedPassword);
+        String expected = password;
+        boolean ok = ulen > 0 && plen > 0 && !expected.isBlank()
+                && MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), passwd);
 
         out.write(new byte[]{0x01, (byte) (ok ? 0x00 : 0x01)});
         out.flush();
@@ -268,10 +297,10 @@ public class SocksRelayServer {
     private String[] readConnectRequest(InputStream in, OutputStream out) throws IOException {
         int ver = readByte(in);
         int cmd = readByte(in);
-        readByte(in); // RSV
+        int reserved = readByte(in);
         int atyp = readByte(in);
 
-        if (ver != SOCKS_VERSION) return null;
+        if (ver != SOCKS_VERSION || reserved != 0) return null;
 
         if (cmd != CMD_CONNECT) {
             sendConnectReply(out, REPLY_CMD_NOT_SUPPORTED);
@@ -302,6 +331,10 @@ public class SocksRelayServer {
         }
 
         int port = (readByte(in) << 8) | readByte(in);
+        if (host.isBlank() || port == 0) {
+            sendConnectReply(out, REPLY_HOST_UNREACHABLE);
+            return null;
+        }
         return new String[]{host, String.valueOf(port)};
     }
 
@@ -323,18 +356,12 @@ public class SocksRelayServer {
 
         try {
             t1.join();
+            t2.join();
         } catch (InterruptedException ignored) {
             Thread.currentThread().interrupt();
-        }
-
-        // One direction ended — force-close both sockets so the other pump thread unblocks.
-        closeQuietly(a);
-        closeQuietly(b);
-
-        try {
-            t2.join(2000);
-        } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt();
+        } finally {
+            closeQuietly(a);
+            closeQuietly(b);
         }
     }
 
@@ -348,12 +375,24 @@ public class SocksRelayServer {
                 out.write(buf, 0, n);
                 out.flush();
             }
+            // Preserve a half-close so an HTTP response can finish after its request ends.
+            to.shutdownOutput();
         } catch (IOException ignored) {
-            // Expected once either side closes the connection.
+            closeQuietly(from);
+            closeQuietly(to);
         }
     }
 
     // ==================== Helpers ====================
+
+    private synchronized boolean track(Socket socket, ServerSocket listener) {
+        if (!running || serverSocket != listener) {
+            closeQuietly(socket);
+            return false;
+        }
+        openSockets.add(socket);
+        return true;
+    }
 
     private int readByte(InputStream in) throws IOException {
         int b = in.read();

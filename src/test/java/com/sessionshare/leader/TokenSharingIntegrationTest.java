@@ -1,0 +1,144 @@
+package com.sessionshare.leader;
+
+import com.sessionshare.follower.TokenPoller;
+import com.sessionshare.model.TokenStore;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
+import static com.sessionshare.leader.RelayIntegrationTest.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+@Timeout(15)
+class TokenSharingIntegrationTest {
+    @Test void followerImportsAuthenticatedTokensFromLeader() throws Exception {
+        TokenStore source = new TokenStore();
+        source.setTarget("localhost");
+        source.applyCapturedResponse(java.util.Map.of(), "synthetic-token", null, java.util.Map.of());
+        TokenServer leader = new TokenServer(api(), source);
+        TokenStore destination = new TokenStore();
+        TokenPoller follower = new TokenPoller(api(), destination);
+        try {
+            leader.setPassword("loopback-password");
+            leader.start(0, LOOPBACK);
+            follower.setLeaderPort(port(leader));
+            follower.setPassword("loopback-password");
+            follower.setPollIntervalSeconds(3600);
+            follower.start();
+
+            await(() -> follower.getLastFetchTime() != null);
+
+            assertEquals("synthetic-token", destination.getJwt());
+            assertEquals("", follower.getLastError());
+            assertEquals(0, follower.getConsecutiveFailures());
+            assertEquals(1, leader.getRequestCount());
+        } finally {
+            follower.stop();
+            leader.stop();
+        }
+    }
+
+    @Test void emptyPasswordsCannotStartEitherTokenEndpoint() {
+        TokenServer leader = new TokenServer(api(), new TokenStore());
+        TokenPoller follower = new TokenPoller(api(), new TokenStore());
+
+        assertThrows(IllegalArgumentException.class, () -> leader.start(0, LOOPBACK));
+        assertThrows(IllegalArgumentException.class, follower::start);
+        assertFalse(leader.isRunning());
+        assertFalse(follower.isConnected());
+    }
+
+    @Test void tokenServerFailsClosedWhenPasswordIsClearedAndDisablesCaching() throws Exception {
+        TokenServer leader = new TokenServer(api(), new TokenStore());
+        try {
+            leader.setPassword("loopback-password");
+            leader.start(0, LOOPBACK);
+            HttpURLConnection authorized = connection(port(leader), "loopback-password");
+            try {
+                assertEquals(200, authorized.getResponseCode());
+                assertEquals("no-store", authorized.getHeaderField("Cache-Control"));
+            } finally {
+                authorized.disconnect();
+            }
+            leader.setPassword("");
+            HttpURLConnection unauthenticated = connection(port(leader), null);
+            try {
+                assertEquals(401, unauthenticated.getResponseCode());
+            } finally {
+                unauthenticated.disconnect();
+            }
+        } finally {
+            leader.stop();
+        }
+    }
+
+    @Test void followerDoesNotFollowRedirectsOrReplaceTokens() throws Exception {
+        TokenStore store = new TokenStore();
+        store.applyCapturedResponse(java.util.Map.of(), "existing-synthetic-token", null, java.util.Map.of());
+        TokenPoller follower = new TokenPoller(api(), store);
+        ExecutorService worker = Executors.newSingleThreadExecutor(r -> {
+            Thread thread = new Thread(r, "Loopback-token-redirect-test");
+            thread.setDaemon(true);
+            return thread;
+        });
+        try (ServerSocket origin = new ServerSocket(0, 1, LOOPBACK);
+             ServerSocket redirectDestination = new ServerSocket(0, 1, LOOPBACK)) {
+            origin.setSoTimeout(3_000);
+            redirectDestination.setSoTimeout(250);
+            Future<?> response = worker.submit(() -> {
+                try (Socket client = origin.accept()) {
+                    client.setSoTimeout(3_000);
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(
+                            client.getInputStream(), StandardCharsets.US_ASCII));
+                    String line;
+                    int lines = 0;
+                    while ((line = reader.readLine()) != null && !line.isEmpty()) {
+                        if (++lines > 100) throw new IllegalStateException("Unexpected request size");
+                    }
+                    client.getOutputStream().write(("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:"
+                            + redirectDestination.getLocalPort() + "/tokens\r\n"
+                            + "Content-Length: 0\r\nConnection: close\r\n\r\n")
+                            .getBytes(StandardCharsets.US_ASCII));
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
+            follower.setLeaderPort(origin.getLocalPort());
+            follower.setPassword("loopback-password");
+            follower.setPollIntervalSeconds(3600);
+            follower.start();
+
+            await(() -> follower.getConsecutiveFailures() == 1);
+            response.get(4, TimeUnit.SECONDS);
+
+            assertNull(follower.getLastFetchTime());
+            assertTrue(follower.getLastError().contains("redirect"));
+            assertEquals("existing-synthetic-token", store.getJwt());
+            assertThrows(SocketTimeoutException.class, redirectDestination::accept);
+        } finally {
+            follower.stop();
+            worker.shutdownNow();
+        }
+    }
+
+    private static HttpURLConnection connection(int port, String password) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) new URL("http://127.0.0.1:" + port + "/tokens")
+                .openConnection(java.net.Proxy.NO_PROXY);
+        connection.setConnectTimeout(3_000);
+        connection.setReadTimeout(3_000);
+        if (password != null) connection.setRequestProperty("X-Auth", password);
+        return connection;
+    }
+}

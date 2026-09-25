@@ -1,305 +1,198 @@
+<div align="center">
+
 # Burp Session Relay
 
-Current release: **v1.0**
+**One application session. Your team's Burp instances.**
 
-A Burp Suite extension (Montoya API) that lets a penetration testing team share session tokens across multiple Burp instances over the LAN — plus a built-in **Session Manager** that auto-refreshes expired tokens during active scans.
+Share authentication tokens, route selected traffic through a teammate's VPN, and keep a configured session current.
 
-When a team shares a single user account on a target application, keeping everyone authenticated is a pain. This extension solves that with a **Leader / Follower** model — one person maintains the session, everyone else stays in sync automatically.
+[![Release](https://img.shields.io/badge/release-v1.1-2563eb)](https://github.com/worldtreeboy/burp-session-relay/releases/latest)
+[![Java](https://img.shields.io/badge/Java-17%2B-e76f00)](#installation)
+[![Tests](https://img.shields.io/badge/local_tests-53_passing-238636)](#development)
+[![License](https://img.shields.io/badge/license-MIT-64748b)](LICENSE)
 
-## How It Works
+[**Download the JAR**](https://github.com/worldtreeboy/burp-session-relay/releases/latest/download/burp-session-relay.jar) · [Quick start](#quick-start) · [VPN routing](#vpn-routing) · [Troubleshooting](#troubleshooting)
 
-```
-┌─────────────────────┐         LAN          ┌─────────────────────┐
-│   Leader's Burp     │◄────────────────────► │  Follower's Burp    │
-│                     │    GET /tokens        │                     │
-│  - Browses target   │    (every 5s)         │  - Auto-injects     │
-│  - Captures tokens  │                       │    tokens into      │
-│  - Runs HTTP server │                       │    outgoing requests │
-│    on port 8888     │                       │                     │
-└─────────────────────┘                       └─────────────────────┘
-                                              ┌─────────────────────┐
-                                              │  Follower's Burp    │
-                                              │  (any number)       │
-                                              └─────────────────────┘
-```
+</div>
 
-### Leader (one person)
-- Logs into the target application and maintains the active session
-- The extension automatically captures cookies, JWTs, and CSRF tokens from proxied traffic
-- Runs an embedded HTTP server that followers connect to over the LAN
-- Also auto-injects the latest tokens into its own requests
+---
 
-### Followers (everyone else)
-- Poll the leader's server at a configurable interval (default: 5 seconds)
-- Auto-inject fetched tokens (cookies, JWT, CSRF, custom headers) into every outgoing request matching the target scope
-- On 401/403 responses, immediately re-fetch tokens from the leader
+Burp Session Relay is a Java extension for teams testing an application with a shared account. One teammate maintains the login as the **leader**; **followers** receive the latest session tokens in their own Burp instances.
 
-## SOCKS5 Traffic Relay (share a VPN route)
+If the application is reachable only through the leader's VPN, the optional relay can also carry followers' target traffic through that machine.
 
-Token sharing keeps everyone authenticated, but it doesn't get anyone's packets onto a VPN-only target network — that's a routing problem, not a session problem. If only the leader holds a VPN seat, the leader can also expose a **SOCKS5 relay** so followers' own Burp traffic egresses through the leader's machine (and therefore through its VPN route).
+## At a glance
 
-### How it works
+| Feature | What it helps you do |
+| --- | --- |
+| **Session sharing** | Keep cookies, JWTs, CSRF tokens, and selected response headers synchronized across the team. |
+| **VPN routing** | Send selected domains through the leader's existing network route while intercepting traffic on the follower. |
+| **Session manager** | Use a configured login request to refresh tokens near JWT expiry or after a 401/403. Also works on its own. |
+| **Clear session status** | See connection state and stored token types, with token values hidden by default. |
 
-- The leader checks **Enable** under **SOCKS5 Relay** in the Leader Configuration panel and sets a port (default: `1080`), then clicks **Start Server** (this starts the token server and the SOCKS relay together).
-- The relay is a minimal SOCKS5 server (RFC 1928, `CONNECT` only) gated with username/password auth (RFC 1929) using the same **Password** field as the token server. Domain names are resolved on the leader's machine (remote DNS), which is what makes split-DNS VPNs work correctly.
-- For domain-selective routing, the follower starts its local routing service and points Burp's SOCKS setting to `127.0.0.1`. The follower sends matching Target Scope domains through the leader and connects to other destinations directly.
+## A simpler interface
 
-### What it does *not* do
+Set **Target domains** once at the top, choose **Leader** or **Follower**, then open the tab for the task you need.
 
-- A phone must use the follower's Burp listener as its HTTP/HTTPS proxy. The extension does not provide transparent OS-level routing or NAT for traffic that bypasses Burp.
-- The relay only permits destinations matching the configured Target Scope. It still carries sensitive traffic and credentials, so use it only on a trusted LAN and keep the password private.
+![Session sharing interface in Burp Session Relay v1.1](docs/images/session-sharing.png)
 
-## Phone → Follower → Leader Domain Routing
+| Tab | What you configure |
+| --- | --- |
+| **Session sharing** | Leader or follower connection details and additional token headers |
+| **VPN routing** | The leader's relay or the follower's local SOCKS listener |
+| **Session manager** | A login request and automatic refresh settings |
+| **Tokens & status** | Current tokens, with an explicit option to reveal their values |
 
-The follower includes a loopback-only selective SOCKS proxy. This supports the following flow while keeping interception on the follower:
+<details>
+<summary><strong>Preview the VPN routing tab</strong></summary>
 
-```
-Phone → follower Burp proxy → 127.0.0.1 selective SOCKS → leader SOCKS/VPN → target
-Phone ← follower Burp proxy ← 127.0.0.1 selective SOCKS ← leader SOCKS/VPN ← target
-```
+![Follower VPN routing settings](docs/images/vpn-routing.png)
 
-Only hosts in **Target Scope** are forwarded through the leader. Other hosts connect directly from the follower. Target Scope accepts comma-separated domains and wildcards, for example:
+</details>
 
-```
-example.com, *.internal.example.com, login.partner.test
-```
-
-Use **+ Add Domain** to append targets. Use **Route All (*)** on both leader and follower to route every domain through the leader; this also broadens token injection to every hostname, so enable it only intentionally.
-
-Setup:
-
-1. On the leader, enable **SOCKS5 Relay**, choose its port, enter a non-empty password and Target Scope, then start the server.
-2. On the follower, enter Leader IP, the same password and Target Scope. Set **Leader SOCKS port** to the leader's relay port and choose a free **Local port** (default `1081`).
-3. Click **Start Domain Routing**.
-4. In the follower's Burp network settings, set the SOCKS proxy to `127.0.0.1:1081`, select SOCKS5, leave authentication empty, and enable DNS resolution through SOCKS.
-5. Configure the phone to use the follower laptop's Burp listener as its HTTP/HTTPS proxy as usual.
-
-DNS-over-SOCKS is required because domain-selective routing needs the original hostname. If Burp resolves a hostname to an IP before SOCKS, the extension cannot safely determine which configured domain it belongs to and the leader will reject it.
-
-## Session Manager (Auto-Refresh)
-
-The Session Manager keeps your session alive automatically — **no Leader/Follower server required**. It works as a standalone feature for solo pentesters or alongside the team sharing features.
-
-### How it works
-
-You configure a **login macro** (the HTTP request that authenticates you). The extension then:
-
-1. **JWT Expiry Pre-check** — Before every outgoing request, decodes the JWT's `exp` claim. If it expires within the buffer window (default: 30 seconds), the login macro fires automatically *before* the request goes out. This prevents 401s proactively.
-
-2. **401/403 Auto-refresh** — If any in-scope response comes back 401 or 403, the login macro fires on a background thread. All subsequent requests get the fresh tokens.
-
-3. **Token capture from login response** — After the login macro runs, the extension extracts new cookies, JWTs (from headers, Set-Cookie, and response body), and CSRF tokens automatically.
-
-### Why this matters for active scanning
-
-Without the Session Manager, a long active scan can lose its session mid-scan — every request after expiry gets 401, making the scan results useless. With it:
-
-- Active scan request about to go out → pre-check catches expired JWT → login macro runs → fresh token injected → request succeeds
-- If a 401 slips through, the response handler refreshes for all following requests
-- Rate-limited to one refresh per 5 seconds (prevents flooding the login endpoint)
-
-### Session Manager Setup
-
-1. Set the **Target Scope** in the Leader or Follower config (the Session Manager uses the same scope)
-2. Scroll down to the **Session Manager** panel (always visible at the bottom)
-3. Enter the **Login URL** (e.g., `https://target.com/api/login`)
-4. Set the **Method** (POST/GET/PUT) and **Content-Type**
-5. Enter the **Body** (e.g., `username=admin&password=pass123` or `{"user":"admin","pass":"secret"}`)
-6. Optionally add **Extra Headers** (one per line, `Name: Value` format)
-7. Click **Test Login Macro** to verify it works (shows success/failure dialog)
-8. Check **Enable Session Manager**
-9. The live status shows JWT expiry countdown, refresh count, and last refresh result
-
-### Tab Layout
-
-The Session Manager panel sits at the **bottom half** of the Burp Session Relay tab, below the Leader/Follower cards. Drag the divider to resize.
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  Role (Token Sharing)                                   │
-│  ○ Leader  ○ Follower                                   │
-│  [Leader/Follower config fields + token display]        │
-│                                                         │
-├═══════════════════ draggable divider ═══════════════════─┤
-│                                                         │
-│  Session Manager — Auto-Refresh                         │
-│  [✓] Enable Session Manager       Refresh [30] sec      │
-│                                                         │
-│  Login URL:      [https://target.com/api/login        ] │
-│  Method: [POST ▼]   Content-Type: [application/json   ] │
-│  Body:           [{"user":"admin","pass":"secret"}     ] │
-│  Extra Headers:  [X-Custom-Header: value              ] │
-│                                                         │
-│  [Test Login Macro]  [Refresh Now]                      │
-│  JWT: Expires in 285s | Refreshes: 3                    │
-└─────────────────────────────────────────────────────────┘
-```
-
-### Example: Form-based login (POST with URL-encoded body)
-
-```
-Login URL:      https://academy.hackthebox.com/api/v1/login
-Method:         POST
-Content-Type:   application/x-www-form-urlencoded
-Body:           email=user@test.com&password=MyPassword123
-Extra Headers:  (leave empty)
-```
-
-### Example: JSON API login
-
-```
-Login URL:      https://api.target.com/auth/login
-Method:         POST
-Content-Type:   application/json
-Body:           {"username":"admin","password":"P@ssw0rd!"}
-Extra Headers:  X-Requested-With: XMLHttpRequest
-```
-
-### Example: Login with CSRF token
-
-```
-Login URL:      https://target.com/login
-Method:         POST
-Content-Type:   application/x-www-form-urlencoded
-Body:           username=admin&password=secret&_token=abc123
-Extra Headers:  X-CSRF-Token: abc123
-                Referer: https://target.com/login
-```
-
-### UI Features
-
-| Feature | Description |
-|---------|-------------|
-| **Enable checkbox** | Validates that Login URL and Target Scope are set before enabling |
-| **Test Login Macro** | Sends the login request once without enabling auto-refresh — shows result dialog |
-| **Refresh Now** | Force an immediate session refresh |
-| **JWT countdown** | Live display: "Expires in 285s" with color coding (green > 60s, orange < 60s, red = expired) |
-| **Refresh counter** | Tracks total number of auto-refreshes performed |
-| **Expiry buffer** | Configurable seconds before expiry to trigger refresh (default: 30) |
-
-## What Gets Shared
-
-| Token Type | How It's Captured | How It's Injected |
-|------------|-------------------|-------------------|
-| **Cookies** | `Set-Cookie` headers from responses | `Cookie` header on requests |
-| **JWT** | `Authorization: Bearer` headers, JWTs in cookie values | `Authorization: Bearer <jwt>` header |
-| **CSRF** | Configured header name, meta tags in HTML | Configured header on requests |
-| **Custom Headers** | User-defined header names (via `[+]` button) | Matching headers on requests |
-
-Some apps bind two of these together (e.g. a session cookie plus a device/session-binding header, or a nonce tied to a specific cookie) — if the pair ever gets split across two different points in time, requests fail even though each field individually looks valid. Capture and injection both read/write every field as a single atomic snapshot (one lock acquisition), so a request is never built from a mix of a fresh field and a stale one.
-
-## JWT Scanner
-
-The extension includes a passive JWT security check (read-only traffic analysis — it never sends forged requests).
-
-| Finding | What it detects | Severity |
-|---------|----------------|----------|
-| **Algorithm "none"** | JWT header has `"alg": "none"` — no signature | High |
-| **Missing expiry** | JWT payload has no `exp` claim — token never expires | Medium |
-| **Expired token accepted** | Expired JWT sent in request AND server responded 2xx (confirmed acceptance) | High |
-| **Sensitive data in payload** | JWT payload contains fields like `password`, `ssn`, `credit_card` | High |
-| **HS256 usage** | JWT uses HS256 — informational flag to remind tester to attempt offline secret cracking with `hashcat -m 16500` | Info |
-
-### Where do findings appear?
-
-JWT scanner findings show up in Burp's **Dashboard** (Issues tab) and **Target → Issues** — not in the Burp Session Relay extension tab. They appear alongside Burp's own findings with the severity and confidence levels shown above, and fire automatically as traffic flows through Burp's proxy.
+*Screenshots are rendered from the extension's Swing UI with example data. Appearance follows your Burp theme.*
 
 ## Installation
 
-### Build from source
+**Requires:** Java 17+ and a Burp Suite version with Montoya API support.
+
+1. Download [**burp-session-relay.jar**](https://github.com/worldtreeboy/burp-session-relay/releases/latest/download/burp-session-relay.jar) from the latest release.
+2. In Burp, open **Extensions → Add** and select **Java**.
+3. Choose the downloaded JAR. The **Burp Session Relay** tab appears.
+
+**Upgrading?** Reload the extension after replacing the JAR. Version 1.1 removes JWT security findings from Burp's Issues integration. Previously saved findings remain in your project; session-manager JWT expiry checks still work.
+
+## Quick start
+
+### 1. Choose the target domains
+
+Enter the application's domains at the top of the tab, for example:
+
+```text
+example.com, *.internal.test
+```
+
+Domain entries include their subdomains. All listed domains use **one shared token pool**, so keep unrelated sites and accounts in separate Burp instances. Changing target domains clears stored tokens.
+
+### 2. Start the leader
+
+1. Select **Leader** and open **Session sharing**.
+2. Enter a **Shared password** and choose the **Token-sharing port** (default `8888`).
+3. If your application needs them, open **Additional token headers** to configure CSRF and other response headers.
+4. Click **Start sharing**, then log in to the application through the leader's Burp instance.
+
+Captured tokens appear under **Tokens & status**.
+
+### 3. Connect a follower
+
+1. Select **Follower** and use the same target domains.
+2. Enter the leader's reachable hostname or IP address, token-sharing port, and shared password.
+3. Click **Connect to leader**.
+
+The status shows when tokens have actually been received. Followers check for updates every **5 seconds** by default and apply them to requests for the configured domains.
+
+> **Need access through the leader's VPN?** Complete the routing setup below as well. The token-sharing connection carries authentication data; website traffic uses a separate SOCKS connection.
+
+## VPN routing
+
+The leader must already be connected to a VPN that can reach the target website. The extension uses the leader's operating system routes and DNS; it does not establish a VPN.
+
+```mermaid
+flowchart LR
+    B["Follower Burp"] --> L["Local SOCKS<br/>127.0.0.1:1081"]
+    L -->|Target domains| R["Leader SOCKS<br/>port 1080"]
+    R --> V["Leader's VPN route"]
+    V --> T["Private website"]
+    L -->|Other domains| D["Direct from follower"]
+```
+
+### On the leader
+
+In **VPN routing**, select **Enable VPN relay when sharing starts** and choose a **VPN relay port** (default `1080`). Then click **Start sharing**.
+
+The relay starts and stops with sharing. It uses the same password and target domains. Stop sharing before changing these settings.
+
+### On the follower
+
+1. Enter the leader address and shared password in **Session sharing**.
+2. In **VPN routing**, set **Leader VPN relay port** to the leader's relay port.
+3. Choose a free **Local SOCKS port** (default `1081`) and click **Start local routing**.
+4. In Burp's network settings, configure SOCKS5 with host `127.0.0.1` and the selected local port.
+5. Leave authentication empty for this local connection and enable hostname/DNS resolution through SOCKS.
+
+Starting the local listener does not change Burp's network settings or verify website connectivity. The leader's relay port must be reachable, and the VPN must permit the Java process to use its route.
+
+### Which port goes where?
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| Leader token-sharing port | `8888` | Followers fetch session tokens |
+| Leader VPN relay port | `1080` | The leader forwards target website traffic |
+| Follower local SOCKS port | `1081` | Burp connects to `127.0.0.1` on the follower |
+
+**Phone testing:** point the phone's HTTP/HTTPS proxy at the follower's Burp listener. Interception stays on the follower.
+
+**Stopping routing:** disable or change Burp's SOCKS setting when you stop the local listener, so Burp does not keep sending traffic to a stopped service.
+
+## Session manager
+
+This optional feature works alongside team sharing or on its own.
+
+1. Set the target domains and open **Session manager**.
+2. Enter the login URL, HTTP method, content type, request body, and any extra headers.
+3. Click **Test login request** to send one request and inspect the token update.
+4. Enable **automatic session refresh** when the configuration is ready.
+
+JWT expiry is checked before outgoing requests with a default **30-second buffer**. An in-scope 401/403 triggers a background refresh for subsequent requests. The failed request is not retried, and refresh attempts remain limited to one per five seconds.
+
+The configuration represents one HTTP request. Multi-step login flows, interactive MFA, and redirects may need additional handling outside this extension. Receiving tokens does not by itself prove that a protected request will be authorized.
+
+## Troubleshooting
+
+| What you see | What to check |
+| --- | --- |
+| Waiting for the first token response | Leader address, token-sharing port, listener state, and local firewall |
+| Authentication error | The shared password must match on both instances |
+| Tokens arrive, but the private website is unreachable | Enable the separate VPN relay and configure Burp's local SOCKS connection |
+| A hostname fails through the relay | Enable DNS through SOCKS and check both instances' target domains |
+| Burp loses connectivity after routing stops | Disable or update Burp's SOCKS proxy setting |
+| Role or target fields are disabled | Stop active sharing, routing, and session refresh first |
+
+## Security and scope
+
+- **Use a trusted network.** Token sharing uses plain HTTP; the shared secret and SOCKS authentication are not encrypted. These listeners are not designed to be exposed to the public internet.
+- **Keep the target list specific.** Token injection and routing share the same scope. Setting `*` applies tokens to every hostname as well as routing every destination.
+- **One pool represents one session.** Cookies are stored without browser-style domain/path isolation. Use separate Burp instances for independent sites, accounts, or sessions.
+- **Token values are hidden by default.** Reveal them only when you need to inspect them.
+
+Token responses disable caching, token fetches refuse redirects, and the leader relay requires authentication and enforces the configured target scope.
+
+## Development
+
+Build and run the tests on Windows:
+
+```powershell
+.\gradlew.bat clean test shadowJar
+```
+
+On macOS or Linux:
 
 ```bash
-git clone https://github.com/worldtreeboy/burp-session-relay.git
-cd burp-session-relay
-./gradlew shadowJar
+./gradlew clean test shadowJar
 ```
 
-The JAR will be at `build/libs/burp-session-relay.jar`.
+The extension JAR is written to `build/libs/burp-session-relay.jar`.
 
-### Load in Burp Suite
+**v1.1 validation:** 53 tests pass, covering token state, input validation, cookie handling, UI defaults, and local token-sharing/SOCKS forwarding. The routing tests use a loopback HTTP fixture. They do not verify a real VPN, LAN firewall, or a particular site's login behavior.
 
-1. Go to **Extensions** → **Add**
-2. Extension type: **Java**
-3. Select `burp-session-relay.jar`
-4. The **Burp Session Relay** tab will appear in Burp
+### What's changed in v1.1
 
-## Usage
+- Reorganized the UI into four focused tabs with shared target settings and clearer status.
+- Added input validation and masked token values.
+- Fixed stale credentials, scope handling, removed headers, and cookie expiry precedence.
+- Hardened token imports, redirect handling, and relay connection cleanup.
+- Removed the JWT security findings feature; session-manager expiry checks remain.
 
-### Leader Setup
+## License
 
-1. Switch to the **Burp Session Relay** tab
-2. Select **Leader** role
-3. Set the **Target Scope** to your target domain (e.g., `academy.hackthebox.com`)
-4. Set a **Password** (shared secret for LAN authentication)
-5. Optionally configure **CSRF Header** name and **Custom Headers** via the `[+]` button
-6. Optionally check **Enable** under **SOCKS5 Relay** and set a port (default: `1080`) to also share this machine's network route (e.g. a VPN) with followers
-7. Click **Start Server**
-8. Browse the target app — tokens are captured automatically
-
-### Follower Setup
-
-1. Switch to the **Burp Session Relay** tab
-2. Select **Follower** role
-3. Enter the leader's **IP address** and **Port** (default: 8888)
-4. Enter the same **Password**
-5. Set the **Target Scope** to match the leader's
-6. Click **Connect**
-7. Tokens are now auto-injected into your requests
-8. For selective route sharing, enter the leader SOCKS port and a local port, then click **Start Domain Routing**
-9. Set Burp's SOCKS5 proxy to `127.0.0.1` and that local port, with DNS resolution through SOCKS enabled
-
-### Solo Use (Session Manager only)
-
-1. Switch to the **Burp Session Relay** tab
-2. Set the **Target Scope** in either Leader or Follower config (no need to start server or connect)
-3. Configure the **Login Macro** in the Session Manager panel at the bottom
-4. Click **Test Login Macro** to verify it works
-5. Check **Enable Session Manager**
-6. Run your active scan — the session stays alive automatically
-
-## Project Structure
-
-```
-src/main/java/com/sessionshare/
-├── SessionShareExtension.java      # BurpExtension entry point
-├── model/
-│   └── TokenStore.java             # Thread-safe token storage
-├── leader/
-│   ├── TokenCaptureHandler.java    # Captures tokens from proxy traffic
-│   ├── TokenServer.java            # Embedded HTTP server (raw ServerSocket)
-│   └── SocksRelayServer.java       # Embedded SOCKS5 relay (shares the leader's route/VPN)
-├── follower/
-│   ├── TokenPoller.java            # Polls leader for tokens
-│   └── TokenInjector.java          # Injects tokens into requests
-├── session/
-│   ├── SessionManager.java         # Login macro, JWT expiry check, auto-refresh
-│   └── SessionHttpHandler.java     # HTTP handler for session management
-├── scanner/
-│   └── JwtPassiveScanCheck.java    # Passive + active JWT security scanner
-└── ui/
-    └── ConfigPanel.java            # Swing UI tab
-```
-
-## API Endpoints (Leader)
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `GET` | `/tokens` | `X-Auth` header | Returns all current tokens as JSON |
-| `GET` | `/health` | None | Health check / connectivity test |
-
-## Requirements
-
-- Burp Suite Professional or Community (with Montoya API support)
-- Java 17+
-- Team members on the same LAN (for Leader/Follower sharing)
-- Session Manager works solo — no LAN required
-
-## Security Note
-
-This is a **pentest team coordination tool** for use on trusted networks during engagements. The password is a simple shared secret sent as an HTTP header — it is not designed for internet-facing security.
-
-## v1.0
-
-The first Burp Session Relay release includes session-token synchronization, Leader/Follower roles,
-domain-selective routing through the leader's VPN, phone and local-tool proxy support, multiple and
-wildcard domains, Route All mode, session auto-refresh, scoped SOCKS5 relaying, and Java 17 support.
+[MIT](LICENSE) · Copyright © 2026 worldtreeboy

@@ -16,8 +16,10 @@ public final class SetCookieParser {
         if (equals <= 0) return null;
 
         String name = parts[0].substring(0, equals).trim();
+        if (!name.matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+")) return null;
         String value = parts[0].substring(equals + 1).trim();
-        boolean deleted = value.isEmpty();
+        Long maxAge = null;
+        Instant expires = null;
 
         for (int i = 1; i < parts.length; i++) {
             String attribute = parts[i].trim();
@@ -26,15 +28,17 @@ public final class SetCookieParser {
             String attributeValue = attributeEquals < 0 ? "" : attribute.substring(attributeEquals + 1).trim();
             if (attributeName.equalsIgnoreCase("Max-Age")) {
                 try {
-                    if (Long.parseLong(attributeValue) <= 0) deleted = true;
+                    maxAge = Long.parseLong(attributeValue);
                 } catch (NumberFormatException ignored) {}
             } else if (attributeName.equalsIgnoreCase("Expires")) {
                 try {
-                    Instant expiry = ZonedDateTime.parse(attributeValue, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant();
-                    if (!expiry.isAfter(now)) deleted = true;
+                    expires = ZonedDateTime.parse(attributeValue, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant();
                 } catch (DateTimeParseException ignored) {}
             }
         }
+        // A valid Max-Age takes precedence over Expires regardless of attribute order.
+        boolean deleted = value.isEmpty()
+                || (maxAge != null ? maxAge <= 0 : expires != null && !expires.isAfter(now));
         return new ParsedCookie(name, deleted ? "" : value, deleted);
     }
 

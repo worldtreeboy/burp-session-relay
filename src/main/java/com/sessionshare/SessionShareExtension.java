@@ -10,10 +10,11 @@ import com.sessionshare.leader.SocksRelayServer;
 import com.sessionshare.leader.TokenCaptureHandler;
 import com.sessionshare.leader.TokenServer;
 import com.sessionshare.model.TokenStore;
-import com.sessionshare.scanner.JwtPassiveScanCheck;
 import com.sessionshare.session.SessionHttpHandler;
 import com.sessionshare.session.SessionManager;
 import com.sessionshare.ui.ConfigPanel;
+
+import javax.swing.SwingUtilities;
 
 /**
  * Burp Session Relay — Burp Suite extension for sharing session tokens and routes across
@@ -23,13 +24,13 @@ import com.sessionshare.ui.ConfigPanel;
  *   - Leader captures tokens from proxied traffic and serves them via an embedded HTTP server.
  *   - Followers poll the leader and auto-inject tokens into their outgoing requests.
  *   - Session Manager (independent): auto-refreshes expired tokens via a login macro,
- *     pre-checks JWT expiry, and retries on 401/403.
+ *     pre-checks JWT expiry, and refreshes subsequent requests after 401/403.
  *
  * Built on the Montoya API. No legacy burp.I* interfaces.
  */
 public class SessionShareExtension implements BurpExtension {
 
-    private static final String VERSION = "1.0";
+    private static final String VERSION = "1.1";
 
     private TokenStore tokenStore;
     private TokenServer tokenServer;
@@ -72,17 +73,30 @@ public class SessionShareExtension implements BurpExtension {
         // 6. Register proxy response handler — leader only captures from proxy traffic
         api.proxy().registerResponseHandler(captureHandler);
 
-        // 7. Register passive + active JWT scanner
-        api.scanner().registerScanCheck(new JwtPassiveScanCheck(api));
-
-        // 8. Build and register the UI tab
-        configPanel = new ConfigPanel(api, tokenStore, tokenServer, socksRelayServer, captureHandler,
-                tokenPoller, tokenInjector, selectiveSocksProxy, sessionManager);
+        // 7. Build and register the UI tab
+        Runnable createUi = () -> configPanel = new ConfigPanel(api, tokenStore, tokenServer,
+                socksRelayServer, captureHandler, tokenPoller, tokenInjector,
+                selectiveSocksProxy, sessionManager);
+        if (SwingUtilities.isEventDispatchThread()) {
+            createUi.run();
+        } else {
+            try {
+                SwingUtilities.invokeAndWait(createUi);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted while creating extension UI", ex);
+            } catch (java.lang.reflect.InvocationTargetException ex) {
+                throw new IllegalStateException("Could not create extension UI", ex.getCause());
+            }
+        }
         api.userInterface().registerSuiteTab("Burp Session Relay", configPanel);
 
-        // 9. Cleanup on extension unload
+        // 8. Cleanup on extension unload
         api.extension().registerUnloadingHandler(() -> {
             api.logging().logToOutput("Burp Session Relay unloading...");
+
+            // Mark the UI disposed before a background login test can restore its state.
+            configPanel.stopUiRefresh();
 
             // Stop leader server
             tokenServer.stop();
@@ -96,9 +110,6 @@ public class SessionShareExtension implements BurpExtension {
 
             // Disable session manager
             sessionManager.setEnabled(false);
-
-            // Stop UI refresh
-            configPanel.stopUiRefresh();
 
             api.logging().logToOutput("Burp Session Relay unloaded.");
         });

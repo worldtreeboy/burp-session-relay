@@ -75,7 +75,7 @@ public class TokenCaptureHandler implements HttpHandler, ProxyResponseHandler {
         try {
             String url = response.initiatingRequest().url();
             if (isInScope(url)) {
-                extractTokensFromResponse(response.headers(), null);
+                extractTokensFromResponse(url, response.headers(), null);
             }
         } catch (Exception e) {
             api.logging().logToError("Error capturing tokens from HTTP response: " + e.getMessage());
@@ -95,9 +95,8 @@ public class TokenCaptureHandler implements HttpHandler, ProxyResponseHandler {
 
         try {
             String url = interceptedResponse.initiatingRequest().url();
-            if (isInScope(url)) {
-                extractTokensFromResponse(interceptedResponse.headers(),
-                        interceptedResponse.bodyToString());
+            if (isInScope(url) && extractTokensFromResponse(url, interceptedResponse.headers(),
+                    interceptedResponse.bodyToString())) {
                 api.logging().logToOutput("[Leader] Captured tokens from proxy response: " + url);
             }
         } catch (Exception e) {
@@ -118,7 +117,7 @@ public class TokenCaptureHandler implements HttpHandler, ProxyResponseHandler {
      * Extract cookies, JWTs, and CSRF tokens from response headers and body, then apply them
      * to the token store as a single atomic batch — see TokenStore.applyCapturedResponse for why.
      */
-    private void extractTokensFromResponse(List<HttpHeader> headers, String body) {
+    private boolean extractTokensFromResponse(String sourceUrl, List<HttpHeader> headers, String body) {
         Map<String, String> capturedCookies = new LinkedHashMap<>();
         Map<String, String> capturedCustomHeaders = new LinkedHashMap<>();
         String capturedJwt = null;
@@ -162,7 +161,8 @@ public class TokenCaptureHandler implements HttpHandler, ProxyResponseHandler {
             if (bodyCsrf != null) capturedCsrf = bodyCsrf;
         }
 
-        tokenStore.applyCapturedResponse(capturedCookies, capturedJwt, capturedCsrf, capturedCustomHeaders);
+        return tokenStore.applyCapturedResponseForUrl(sourceUrl, capturedCookies, capturedJwt,
+                capturedCsrf, capturedCustomHeaders);
     }
 
     /**
@@ -229,7 +229,8 @@ public class TokenCaptureHandler implements HttpHandler, ProxyResponseHandler {
      */
     private HttpRequest injectTokens(HttpRequest request) {
         HttpRequest modified = request;
-        TokenStore.Snapshot snapshot = tokenStore.getSnapshot();
+        TokenStore.Snapshot snapshot = tokenStore.getSnapshotForUrl(request.url());
+        if (snapshot == null) return request;
 
         // Inject cookies
         if (!snapshot.cookieString.isEmpty()) {

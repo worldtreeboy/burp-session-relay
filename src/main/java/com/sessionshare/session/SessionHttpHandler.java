@@ -102,7 +102,8 @@ public class SessionHttpHandler implements HttpHandler {
      */
     private HttpRequest injectTokens(HttpRequest request) {
         HttpRequest modified = request;
-        TokenStore.Snapshot snapshot = tokenStore.getSnapshot();
+        TokenStore.Snapshot snapshot = tokenStore.getSnapshotForUrl(request.url());
+        if (snapshot == null) return request;
 
         // Cookies
         if (!snapshot.cookieString.isEmpty()) {
@@ -175,7 +176,8 @@ public class SessionHttpHandler implements HttpHandler {
                 }
             }
 
-            tokenStore.applyCapturedResponse(capturedCookies, capturedJwt, capturedCsrf, capturedCustomHeaders);
+            tokenStore.applyCapturedResponseForUrl(response.initiatingRequest().url(), capturedCookies,
+                    capturedJwt, capturedCsrf, capturedCustomHeaders);
         } catch (Exception e) {
             api.logging().logToError("[SessionManager] Error capturing tokens from response: " + e.getMessage());
         }

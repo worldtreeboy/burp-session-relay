@@ -4,12 +4,20 @@ import burp.api.montoya.MontoyaApi;
 import com.sessionshare.model.TokenStore;
 
 import java.io.*;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -27,7 +35,8 @@ public class TokenServer {
     private ServerSocket serverSocket;
     private ExecutorService executor;
     private volatile boolean running = false;
-    private String password = "";
+    private volatile String password = "";
+    private final Set<Socket> openSockets = ConcurrentHashMap.newKeySet();
     private final AtomicLong requestCount = new AtomicLong(0);
 
     public TokenServer(MontoyaApi api, TokenStore tokenStore) {
@@ -51,7 +60,12 @@ public class TokenServer {
      * Start the embedded HTTP server on the given port.
      * Binds to 0.0.0.0 so followers on the LAN can connect.
      */
-    public void start(int port) throws IOException {
+    public synchronized void start(int port) throws IOException {
+        start(port, null);
+    }
+
+    // Allows loopback-only integration checks without exposing a test listener to the LAN.
+    synchronized void start(int port, InetAddress bindAddress) throws IOException {
         if (running) {
             api.logging().logToOutput("[Server] Already running.");
             return;
@@ -60,17 +74,36 @@ public class TokenServer {
         if (password == null || password.isBlank()) {
             throw new IllegalArgumentException("A password is required");
         }
-        serverSocket = new ServerSocket(port, 50);
-        executor = Executors.newFixedThreadPool(5);
+        serverSocket = new ServerSocket(port, 50, bindAddress);
+        ServerSocket listener = serverSocket;
+        executor = new ThreadPoolExecutor(5, 5, 0, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(32), runnable -> {
+                    Thread thread = new Thread(runnable, "SessionShare-TokenServer");
+                    thread.setDaemon(true);
+                    return thread;
+                });
+        ExecutorService workers = executor;
         running = true;
 
         // Accept loop runs on its own thread
         executor.submit(() -> {
             api.logging().logToOutput("[Server] Accept loop started on port " + port);
-            while (running && !serverSocket.isClosed()) {
+            while (!listener.isClosed()) {
                 try {
-                    Socket client = serverSocket.accept();
-                    executor.submit(() -> handleClient(client));
+                    Socket client = listener.accept();
+                    synchronized (this) {
+                        if (!running || serverSocket != listener) {
+                            close(client);
+                            continue;
+                        }
+                        openSockets.add(client);
+                        try {
+                            workers.execute(() -> handleClient(client));
+                        } catch (RejectedExecutionException e) {
+                            openSockets.remove(client);
+                            close(client);
+                        }
+                    }
                 } catch (SocketException e) {
                     // Expected when serverSocket.close() is called during shutdown
                     if (running) {
@@ -91,7 +124,7 @@ public class TokenServer {
     /**
      * Stop the embedded server and release resources.
      */
-    public void stop() {
+    public synchronized void stop() {
         if (!running) return;
         running = false;
 
@@ -106,6 +139,8 @@ public class TokenServer {
         if (executor != null) {
             executor.shutdownNow();
         }
+        for (Socket client : openSockets) close(client);
+        openSockets.clear();
 
         api.logging().logToOutput("[Server] Stopped.");
     }
@@ -121,7 +156,7 @@ public class TokenServer {
             client.setSoTimeout(5000);
 
             // Read the HTTP request line: "GET /path HTTP/1.1"
-            String requestLine = reader.readLine();
+            String requestLine = readLine(reader, 8192);
             if (requestLine == null || requestLine.isEmpty()) return;
 
             String[] parts = requestLine.split(" ");
@@ -130,16 +165,27 @@ public class TokenServer {
                 return;
             }
 
-            String method = parts[0].toUpperCase();
+            String method = parts[0].toUpperCase(Locale.ROOT);
             String path = parts[1];
 
             // Read all headers
             String authValue = null;
             String line;
-            while ((line = reader.readLine()) != null && !line.isEmpty()) {
-                if (line.toLowerCase().startsWith("x-auth:")) {
+            int headerCharacters = 0;
+            while ((line = readLine(reader, 8192)) != null && !line.isEmpty()) {
+                headerCharacters += line.length() + 2;
+                if (headerCharacters > 32768) throw new IOException("Request headers exceed the size limit");
+                if (line.toLowerCase(Locale.ROOT).startsWith("x-auth:")) {
+                    if (authValue != null) {
+                        sendResponse(out, 400, "{\"error\": \"Duplicate authentication header\"}");
+                        return;
+                    }
                     authValue = line.substring("x-auth:".length()).trim();
                 }
+            }
+            if (line == null) {
+                sendResponse(out, 400, "{\"error\": \"Incomplete request\"}");
+                return;
             }
 
             // Route the request
@@ -157,7 +203,9 @@ public class TokenServer {
             }
 
         } catch (Exception e) {
-            api.logging().logToError("[Server] Client handler error: " + e.getMessage());
+            if (!client.isClosed()) api.logging().logToError("[Server] Client handler error: " + e.getMessage());
+        } finally {
+            openSockets.remove(client);
         }
     }
 
@@ -183,10 +231,25 @@ public class TokenServer {
     // ==================== Helpers ====================
 
     private boolean authenticate(String authValue) {
-        if (password == null || password.isEmpty()) {
-            return true;
+        String expected = password;
+        return expected != null && !expected.isBlank() && authValue != null
+                && MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8),
+                authValue.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String readLine(BufferedReader reader, int limit) throws IOException {
+        StringBuilder line = new StringBuilder();
+        int value;
+        while ((value = reader.read()) != -1) {
+            if (value == '\n') return line.toString();
+            if (line.length() >= limit) throw new IOException("Request line exceeds the size limit");
+            if (value != '\r') line.append((char) value);
         }
-        return password.equals(authValue);
+        return line.isEmpty() ? null : line.toString();
+    }
+
+    private static void close(Socket socket) {
+        try { socket.close(); } catch (IOException ignored) { }
     }
 
     private void sendResponse(OutputStream out, int statusCode, String body) throws IOException {
@@ -204,6 +267,7 @@ public class TokenServer {
         String response = "HTTP/1.1 " + statusCode + " " + statusText + "\r\n"
                 + "Content-Type: application/json\r\n"
                 + "Content-Length: " + bodyBytes.length + "\r\n"
+                + "Cache-Control: no-store\r\n"
                 + "Connection: close\r\n"
                 + "\r\n";
 

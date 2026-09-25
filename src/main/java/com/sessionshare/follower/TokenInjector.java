@@ -83,7 +83,8 @@ public class TokenInjector implements HttpHandler {
      */
     private HttpRequest injectTokens(HttpRequest request) {
         HttpRequest modified = request;
-        TokenStore.Snapshot snapshot = tokenStore.getSnapshot();
+        TokenStore.Snapshot snapshot = tokenStore.getSnapshotForUrl(request.url());
+        if (snapshot == null) return request;
 
         // Inject cookies
         if (!snapshot.cookieString.isEmpty()) {

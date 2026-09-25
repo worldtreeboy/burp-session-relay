@@ -2,11 +2,15 @@ package com.sessionshare.model;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import com.google.gson.reflect.TypeToken;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.sessionshare.util.ScopeMatcher;
 
-import java.lang.reflect.Type;
 import java.time.Instant;
 import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -43,7 +47,16 @@ public class TokenStore {
     }
 
     public void setTarget(String target) {
-        this.target = target;
+        String nextTarget = target == null ? "" : target.trim();
+        lock.writeLock().lock();
+        try {
+            if (!this.target.equals(nextTarget)) {
+                clearTokens();
+                this.target = nextTarget;
+            }
+        } finally {
+            lock.writeLock().unlock();
+        }
     }
 
     public void beginLoginMacro(String url) {
@@ -73,6 +86,16 @@ public class TokenStore {
         }
     }
 
+    /** Return pooled cookies only when the destination is in the current local scope. */
+    public String getCookieStringForUrl(String url) {
+        lock.readLock().lock();
+        try {
+            return ScopeMatcher.matchesUrl(url, target) ? buildCookieString() : "";
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
     private String buildCookieString() {
         if (cookies.isEmpty()) return "";
         StringBuilder sb = new StringBuilder();
@@ -96,7 +119,17 @@ public class TokenStore {
     }
 
     public void setCsrfHeaderName(String csrfHeaderName) {
-        this.csrfHeaderName = csrfHeaderName;
+        String nextName = csrfHeaderName == null ? "" : csrfHeaderName.trim();
+        lock.writeLock().lock();
+        try {
+            if (!this.csrfHeaderName.equalsIgnoreCase(nextName)) {
+                csrfValue = "";
+                updatedAt = Instant.now();
+            }
+            this.csrfHeaderName = nextName;
+        } finally {
+            lock.writeLock().unlock();
+        }
     }
 
     public String getCsrfValue() {
@@ -109,26 +142,49 @@ public class TokenStore {
      * Add a header name to watch for in responses (leader-side config).
      */
     public void addWatchedHeader(String headerName) {
-        watchedHeaders.put(headerName, Boolean.TRUE);
+        if (headerName == null || headerName.isBlank()) return;
+        lock.writeLock().lock();
+        try {
+            String name = headerName.trim();
+            watchedHeaders.keySet().removeIf(existing -> existing.equalsIgnoreCase(name));
+            watchedHeaders.put(name, Boolean.TRUE);
+        } finally {
+            lock.writeLock().unlock();
+        }
     }
 
     /**
      * Remove a header name from the watch list.
      */
     public void removeWatchedHeader(String headerName) {
-        watchedHeaders.remove(headerName);
-        customHeaders.remove(headerName);
+        if (headerName == null) return;
+        String name = headerName.trim();
+        lock.writeLock().lock();
+        try {
+            watchedHeaders.keySet().removeIf(existing -> existing.equalsIgnoreCase(name));
+            if (customHeaders.keySet().removeIf(existing -> existing.equalsIgnoreCase(name))) {
+                updatedAt = Instant.now();
+            }
+        } finally {
+            lock.writeLock().unlock();
+        }
     }
 
     /**
      * Replace the entire watched headers list (called from UI on start).
      */
     public void setWatchedHeaders(java.util.List<String> headerNames) {
-        watchedHeaders.clear();
-        for (String name : headerNames) {
-            if (name != null && !name.trim().isEmpty()) {
-                watchedHeaders.put(name.trim(), Boolean.TRUE);
+        lock.writeLock().lock();
+        try {
+            watchedHeaders.clear();
+            for (String name : headerNames) {
+                addWatchedHeader(name);
             }
+            if (customHeaders.keySet().removeIf(name -> !isWatchedHeader(name))) {
+                updatedAt = Instant.now();
+            }
+        } finally {
+            lock.writeLock().unlock();
         }
     }
 
@@ -136,17 +192,27 @@ public class TokenStore {
      * Get all header names being watched.
      */
     public java.util.Set<String> getWatchedHeaders() {
-        return Collections.unmodifiableSet(watchedHeaders.keySet());
+        lock.readLock().lock();
+        try {
+            return Collections.unmodifiableSet(new LinkedHashSet<>(watchedHeaders.keySet()));
+        } finally {
+            lock.readLock().unlock();
+        }
     }
 
     /**
      * Returns true if the given header name is being watched.
      */
     public boolean isWatchedHeader(String headerName) {
-        for (String watched : watchedHeaders.keySet()) {
-            if (watched.equalsIgnoreCase(headerName)) return true;
+        lock.readLock().lock();
+        try {
+            for (String watched : watchedHeaders.keySet()) {
+                if (watched.equalsIgnoreCase(headerName)) return true;
+            }
+            return false;
+        } finally {
+            lock.readLock().unlock();
         }
-        return false;
     }
 
     // --- Atomic snapshot / batch apply ---
@@ -178,19 +244,70 @@ public class TokenStore {
     }
 
     /**
-     * Read every field needed for request injection in one atomic snapshot.
+     * Read a consistent snapshot for local inspection. Request injection must use
+     * getSnapshotForUrl so scope and credentials are read together.
      */
     public Snapshot getSnapshot() {
         lock.readLock().lock();
         try {
-            return new Snapshot(
-                    buildCookieString(),
-                    jwt,
-                    csrfHeaderName,
-                    csrfValue,
-                    Collections.unmodifiableMap(new java.util.LinkedHashMap<>(customHeaders)));
+            return snapshotUnderLock();
         } finally {
             lock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Return credentials only if url matches the same scope under which they were read.
+     * Returns null for an invalid/out-of-scope URL or an empty scope. The scope check and
+     * immutable snapshot share one read lock, preventing a target change between them.
+     */
+    public Snapshot getSnapshotForUrl(String url) {
+        lock.readLock().lock();
+        try {
+            return ScopeMatcher.matchesUrl(url, target) ? snapshotUnderLock() : null;
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    private Snapshot snapshotUnderLock() {
+        return new Snapshot(buildCookieString(), jwt, csrfHeaderName, csrfValue,
+                Collections.unmodifiableMap(new LinkedHashMap<>(customHeaders)));
+    }
+
+    /**
+     * Commit ordinary captured traffic only while its source still matches the local scope.
+     * Returns false, without changing any state, when the source is no longer eligible.
+     * A true result means the source was accepted; an empty batch may still be a no-op.
+     */
+    public boolean applyCapturedResponseForUrl(String sourceUrl, Map<String, String> newCookies,
+                                                String newJwt, String newCsrfValue,
+                                                Map<String, String> newCustomHeaders) {
+        lock.writeLock().lock();
+        try {
+            if (!ScopeMatcher.matchesUrl(sourceUrl, target)) return false;
+            applyCapturedResponse(newCookies, newJwt, newCsrfValue, newCustomHeaders);
+            return true;
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Commit an explicitly configured login exchange only if its original target is still
+     * selected. Unlike ordinary traffic, the login/SSO host may be outside that target.
+     * Returns false without changing state if the target changed or was not configured.
+     */
+    public boolean applyLoginResponseForTarget(String expectedTarget, Map<String, String> newCookies,
+                                                String newJwt, String newCsrfValue,
+                                                Map<String, String> newCustomHeaders) {
+        lock.writeLock().lock();
+        try {
+            if (expectedTarget == null || expectedTarget.isBlank() || !target.equals(expectedTarget)) return false;
+            applyCapturedResponse(newCookies, newJwt, newCsrfValue, newCustomHeaders);
+            return true;
+        } finally {
+            lock.writeLock().unlock();
         }
     }
 
@@ -223,7 +340,15 @@ public class TokenStore {
             }
             if (hasJwt) this.jwt = newJwt;
             if (hasCsrf) this.csrfValue = newCsrfValue;
-            if (hasCustomHeaders) customHeaders.putAll(newCustomHeaders);
+            if (hasCustomHeaders) {
+                for (Map.Entry<String, String> header : newCustomHeaders.entrySet()) {
+                    // A capture that began before a watch was removed must not restore it.
+                    if (isWatchedHeader(header.getKey())) {
+                        customHeaders.keySet().removeIf(name -> name.equalsIgnoreCase(header.getKey()));
+                        customHeaders.put(header.getKey(), header.getValue());
+                    }
+                }
+            }
             updatedAt = Instant.now();
         } finally {
             lock.writeLock().unlock();
@@ -262,27 +387,89 @@ public class TokenStore {
      * Deserialize JSON from the leader's /tokens endpoint and update this store.
      */
     public void fromJson(String json) {
+        // Parse and validate before changing any live state. The endpoint sends a full
+        // snapshot; missing core fields must not silently keep unrelated old credentials.
+        JsonElement document = JsonParser.parseString(json);
+        if (!document.isJsonObject()) {
+            throw new IllegalArgumentException("Token response must be a JSON object");
+        }
+        JsonObject object = document.getAsJsonObject();
+        Map<String, String> nextCookies = readTokenMap(object, "cookies", true, false);
+        String nextJwt = readString(object, "jwt");
+        String nextCsrfHeader = readString(object, "csrfHeaderName");
+        String nextCsrfValue = readString(object, "csrfValue");
+        // Older leaders may omit the custom-header feature entirely.
+        Map<String, String> nextCustomHeaders = readTokenMap(object, "customHeaders", false, true);
+        validateHeaderValue(nextJwt);
+        validateHeaderValue(nextCsrfValue);
+        if (!nextCsrfHeader.isEmpty()) validateName(nextCsrfHeader);
+        if (nextCsrfHeader.isEmpty() && !nextCsrfValue.isEmpty()) {
+            throw new IllegalArgumentException("CSRF value requires a header name");
+        }
+        if (object.has("target")) readString(object, "target");
+        if (object.has("updatedAt")) Instant.parse(readString(object, "updatedAt"));
+
         lock.writeLock().lock();
         try {
-            TokenPayload payload = GSON.fromJson(json, TokenPayload.class);
-            if (payload == null) return;
-
             // Scope is a local security boundary. Never let a remote leader change where
             // this follower injects credentials.
-            if (payload.cookies != null) {
-                this.cookies.clear();
-                this.cookies.putAll(payload.cookies);
-            }
-            if (payload.jwt != null) this.jwt = payload.jwt;
-            if (payload.csrfHeaderName != null) this.csrfHeaderName = payload.csrfHeaderName;
-            if (payload.csrfValue != null) this.csrfValue = payload.csrfValue;
-            if (payload.customHeaders != null) {
-                this.customHeaders.clear();
-                this.customHeaders.putAll(payload.customHeaders);
-            }
+            cookies.clear();
+            cookies.putAll(nextCookies);
+            jwt = nextJwt;
+            csrfHeaderName = nextCsrfHeader;
+            csrfValue = nextCsrfValue;
+            customHeaders.clear();
+            customHeaders.putAll(nextCustomHeaders);
             this.updatedAt = Instant.now();
         } finally {
             lock.writeLock().unlock();
+        }
+    }
+
+    private static String readString(JsonObject object, String name) {
+        JsonElement value = object.get(name);
+        if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()) {
+            throw new IllegalArgumentException("Token response field must be a string: " + name);
+        }
+        return value.getAsString();
+    }
+
+    private static Map<String, String> readTokenMap(JsonObject object, String name,
+                                                     boolean required, boolean headerMap) {
+        JsonElement element = object.get(name);
+        if (element == null && !required) return Collections.emptyMap();
+        if (element == null || !element.isJsonObject()) {
+            throw new IllegalArgumentException("Token response field must be an object: " + name);
+        }
+        Map<String, String> values = new LinkedHashMap<>();
+        JsonObject entries = element.getAsJsonObject();
+        for (String key : entries.keySet()) {
+            validateName(key);
+            String value = readString(entries, key);
+            validateHeaderValue(value);
+            if (!headerMap && value.indexOf(';') >= 0) {
+                throw new IllegalArgumentException("Invalid cookie value in token response");
+            }
+            if (headerMap && values.keySet().stream().anyMatch(existing -> existing.equalsIgnoreCase(key))) {
+                throw new IllegalArgumentException("Duplicate custom header in token response");
+            }
+            values.put(key, value);
+        }
+        return values;
+    }
+
+    private static void validateName(String name) {
+        if (!name.matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+")) {
+            throw new IllegalArgumentException("Invalid cookie or header name in token response");
+        }
+    }
+
+    private static void validateHeaderValue(String value) {
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
+            if ((ch < 0x20 && ch != '\t') || ch == 0x7f) {
+                throw new IllegalArgumentException("Invalid control character in token response");
+            }
         }
     }
 
@@ -292,14 +479,18 @@ public class TokenStore {
     public void clear() {
         lock.writeLock().lock();
         try {
-            cookies.clear();
-            jwt = "";
-            csrfValue = "";
-            customHeaders.clear();
-            updatedAt = Instant.now();
+            clearTokens();
         } finally {
             lock.writeLock().unlock();
         }
+    }
+
+    private void clearTokens() {
+        cookies.clear();
+        jwt = "";
+        csrfValue = "";
+        customHeaders.clear();
+        updatedAt = Instant.now();
     }
 
     /**
