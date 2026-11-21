@@ -35,11 +35,11 @@ class ScopeMatcherTest {
         assertTrue(ScopeMatcher.matchesUrl("https://unrelated.test/path", "*"));
     }
 
-    @Test void matchesNativeSocksIpv6AndBracketedUrlToSameAddress() throws UnknownHostException {
+    @Test void matchesNumericIpv6AndBracketedUrlToSameAddress() throws UnknownHostException {
         String scope = "example.test, [2001:db8::a]";
         byte[] address = {0x20, 0x01, 0x0d, (byte) 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10};
-        String socksHost = InetAddress.getByAddress(address).getHostAddress();
-        assertTrue(ScopeMatcher.matchesHost(socksHost, scope));
+        String numericHost = InetAddress.getByAddress(address).getHostAddress();
+        assertTrue(ScopeMatcher.matchesHost(numericHost, scope));
         assertTrue(ScopeMatcher.matchesUrl("https://[2001:0DB8:0:0::A]:8443/path", scope));
         assertFalse(ScopeMatcher.matchesHost("2001:db8::b", scope));
         assertFalse(ScopeMatcher.matchesHost("2001:db8::a", "[2001:db8::a%1]"));

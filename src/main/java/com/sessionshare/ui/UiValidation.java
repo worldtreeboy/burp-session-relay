@@ -29,12 +29,14 @@ final class UiValidation {
         throw new IllegalArgumentException("Enter a hostname or IP address without a URL, path, or port. Use brackets around IPv6 addresses.");
     }
 
-    static String scope(String text) {
+    static String credentialScope(String text) {
         String scope = text.trim();
         if (scope.isEmpty()) throw new IllegalArgumentException("Enter the target domains at the top of this tab.");
         for (String entry : scope.split(",", -1)) {
             String domain = entry.trim();
-            if ("*".equals(domain)) continue;
+            if ("*".equals(domain)) {
+                throw new IllegalArgumentException("Replace * with the application’s domains before sharing or refreshing credentials.");
+            }
             if (domain.startsWith("*.")) domain = domain.substring(2);
             try {
                 host(domain);
@@ -43,16 +45,6 @@ final class UiValidation {
             }
         }
         return scope;
-    }
-
-    static String credentialScope(String text) {
-        String domains = scope(text);
-        for (String domain : domains.split(",")) {
-            if (domain.trim().equals("*")) {
-                throw new IllegalArgumentException("Replace * with the application’s domains before sharing or refreshing credentials.");
-            }
-        }
-        return domains;
     }
 
     static String loginUrl(String text) {

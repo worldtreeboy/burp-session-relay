@@ -33,16 +33,14 @@ class UiValidationTest {
     }
 
     @Test void acceptsDomainListsAndRejectsMalformedEntries() {
-        assertEquals("example.test, *.internal.test", UiValidation.scope(" example.test, *.internal.test "));
-        assertEquals("*", UiValidation.scope("*"));
+        assertEquals("example.test, *.internal.test", UiValidation.credentialScope(" example.test, *.internal.test "));
         for (String value : List.of("", "example.test,", ",example.test", "example.test,,internal.test",
                 "https://example.test", "example.test:443", "*.*.example.test", "example.test/path")) {
-            assertThrows(IllegalArgumentException.class, () -> UiValidation.scope(value), value);
+            assertThrows(IllegalArgumentException.class, () -> UiValidation.credentialScope(value), value);
         }
     }
 
-    @Test void allDestinationsAreOnlyValidForRouting() {
-        assertEquals("*", UiValidation.scope("*"));
+    @Test void forbidsAllDestinationsForCredentialSharing() {
         assertThrows(IllegalArgumentException.class, () -> UiValidation.credentialScope("*"));
         assertThrows(IllegalArgumentException.class, () -> UiValidation.credentialScope("example.test, *"));
         assertEquals("*.example.test", UiValidation.credentialScope("*.example.test"));

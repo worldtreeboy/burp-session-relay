@@ -1,5 +1,6 @@
 package com.sessionshare.leader;
 
+import burp.api.montoya.MontoyaApi;
 import com.sessionshare.follower.TokenPoller;
 import com.sessionshare.model.TokenStore;
 import org.junit.jupiter.api.Test;
@@ -7,7 +8,10 @@ import org.junit.jupiter.api.Timeout;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.lang.reflect.Field;
+import java.lang.reflect.Proxy;
 import java.net.HttpURLConnection;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
@@ -17,12 +21,14 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 
-import static com.sessionshare.leader.RelayIntegrationTest.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 @Timeout(15)
 class TokenSharingIntegrationTest {
+    private static final InetAddress LOOPBACK = InetAddress.getLoopbackAddress();
+
     @Test void followerImportsAuthenticatedTokensFromLeader() throws Exception {
         TokenStore source = new TokenStore();
         source.setTarget("localhost");
@@ -133,6 +139,31 @@ class TokenSharingIntegrationTest {
             follower.stop();
             worker.shutdownNow();
         }
+    }
+
+    private static int port(TokenServer server) throws ReflectiveOperationException {
+        Field field = TokenServer.class.getDeclaredField("serverSocket");
+        field.setAccessible(true);
+        ServerSocket listener = (ServerSocket) field.get(server);
+        assertTrue(listener.getInetAddress().isLoopbackAddress());
+        return listener.getLocalPort();
+    }
+
+    private static void await(BooleanSupplier condition) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4);
+        while (!condition.getAsBoolean() && System.nanoTime() < deadline) Thread.sleep(10);
+        assertTrue(condition.getAsBoolean(), "Condition did not complete within four seconds");
+    }
+
+    private static MontoyaApi api() {
+        return (MontoyaApi) Proxy.newProxyInstance(MontoyaApi.class.getClassLoader(),
+                new Class<?>[]{MontoyaApi.class}, (proxy, method, arguments) -> {
+                    if (method.getName().equals("logging")) {
+                        return Proxy.newProxyInstance(method.getReturnType().getClassLoader(),
+                                new Class<?>[]{method.getReturnType()}, (p, m, a) -> null);
+                    }
+                    throw new UnsupportedOperationException(method.getName());
+                });
     }
 
     private static HttpURLConnection connection(int port, String password) throws Exception {

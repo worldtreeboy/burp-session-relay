@@ -5,8 +5,6 @@ import burp.api.montoya.MontoyaApi;
 
 import com.sessionshare.follower.TokenInjector;
 import com.sessionshare.follower.TokenPoller;
-import com.sessionshare.follower.SelectiveSocksProxy;
-import com.sessionshare.leader.SocksRelayServer;
 import com.sessionshare.leader.TokenCaptureHandler;
 import com.sessionshare.leader.TokenServer;
 import com.sessionshare.model.TokenStore;
@@ -17,8 +15,8 @@ import com.sessionshare.ui.ConfigPanel;
 import javax.swing.SwingUtilities;
 
 /**
- * Burp Session Relay — Burp Suite extension for sharing session tokens and routes across
- * a penetration testing team on the same LAN.
+ * Burp Suite extension for forwarding requests through another Burp instance
+ * and optionally sharing a test account's session.
  *
  * Architecture: Leader/Follower model + standalone Session Manager.
  *   - Leader captures tokens from proxied traffic and serves them via an embedded HTTP server.
@@ -30,15 +28,13 @@ import javax.swing.SwingUtilities;
  */
 public class SessionShareExtension implements BurpExtension {
 
-    private static final String VERSION = "1.2.1";
+    private static final String VERSION = "1.2";
 
     private TokenStore tokenStore;
     private TokenServer tokenServer;
-    private SocksRelayServer socksRelayServer;
     private TokenCaptureHandler captureHandler;
     private TokenPoller tokenPoller;
     private TokenInjector tokenInjector;
-    private SelectiveSocksProxy selectiveSocksProxy;
     private SessionManager sessionManager;
     private SessionHttpHandler sessionHttpHandler;
     private ConfigPanel configPanel;
@@ -53,13 +49,11 @@ public class SessionShareExtension implements BurpExtension {
 
         // 2. Leader components
         tokenServer = new TokenServer(api, tokenStore);
-        socksRelayServer = new SocksRelayServer(api);
         captureHandler = new TokenCaptureHandler(api, tokenStore);
 
         // 3. Follower components
         tokenPoller = new TokenPoller(api, tokenStore);
         tokenInjector = new TokenInjector(api, tokenStore, tokenPoller);
-        selectiveSocksProxy = new SelectiveSocksProxy(api);
 
         // 4. Session Manager (works independently of leader/follower)
         sessionManager = new SessionManager(api, tokenStore);
@@ -75,8 +69,7 @@ public class SessionShareExtension implements BurpExtension {
 
         // 7. Build and register the UI tab
         Runnable createUi = () -> configPanel = new ConfigPanel(api, tokenStore, tokenServer,
-                socksRelayServer, captureHandler, tokenPoller, tokenInjector,
-                selectiveSocksProxy, sessionManager);
+                captureHandler, tokenPoller, tokenInjector, sessionManager);
         if (SwingUtilities.isEventDispatchThread()) {
             createUi.run();
         } else {
@@ -100,13 +93,11 @@ public class SessionShareExtension implements BurpExtension {
 
             // Stop leader server
             tokenServer.stop();
-            socksRelayServer.stop();
             captureHandler.setActive(false);
 
             // Stop follower polling
             tokenPoller.stop();
             tokenInjector.setActive(false);
-            selectiveSocksProxy.stop();
 
             // Disable session manager
             sessionManager.setEnabled(false);

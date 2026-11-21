@@ -42,7 +42,7 @@ public final class ScopeMatcher {
         if (host == null || host.isBlank()) return false;
         String value = host.trim();
         if (value.indexOf(':') >= 0) return !normalizeHost(value).isEmpty();
-        // Count integer, abbreviated, octal and hex IPv4 forms as literals before choosing a route.
+        // Count integer, abbreviated, octal and hex IPv4 forms as literals for exact-address matching.
         return IPV4_LITERAL.matcher(value).matches();
     }
 
@@ -74,14 +74,14 @@ public final class ScopeMatcher {
     private static String normalizeHost(String value) {
         if (value.indexOf(':') >= 0) {
             if (value.startsWith("[") && value.endsWith("]")) value = value.substring(1, value.length() - 1);
-            // Zone IDs identify interfaces and must match exactly. SOCKS IPv6 addresses have no zone.
+            // Zone IDs identify interfaces and must match exactly.
             int zoneStart = value.indexOf('%');
             String address = zoneStart < 0 ? value : value.substring(0, zoneStart);
             String zone = zoneStart < 0 ? "" : value.substring(zoneStart);
             try {
                 // Brackets force literal parsing; hostnames never trigger a DNS lookup here.
                 InetAddress literal = InetAddress.getByName("[" + address + "]");
-                // Java also decodes a binary IPv4-mapped SOCKS address as an Inet4Address.
+                // Java represents an IPv4-mapped IPv6 literal as an Inet4Address.
                 if (literal instanceof Inet4Address && zone.isEmpty()) return literal.getHostAddress();
                 return "[" + literal.getHostAddress() + zone + "]";
             } catch (UnknownHostException ignored) {
