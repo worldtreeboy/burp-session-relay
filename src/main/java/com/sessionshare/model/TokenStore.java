@@ -7,7 +7,15 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.sessionshare.util.ScopeMatcher;
 
+import com.sessionshare.util.SetCookieParser;
+import com.sessionshare.util.SetCookieParser.CookieKey;
+import com.sessionshare.util.SetCookieParser.StoredCookie;
+
+import java.net.URI;
 import java.time.Instant;
+import java.util.Comparator;
+import java.util.List;
+import java.util.stream.Collectors;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -23,7 +31,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 public class TokenStore {
 
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
-    private final ConcurrentHashMap<String, String> cookies = new ConcurrentHashMap<>();
+    private final Map<CookieKey, StoredCookie> cookies = new LinkedHashMap<>();
     private volatile String jwt = "";
     private volatile String csrfHeaderName = "";
     private volatile String csrfValue = "";
@@ -80,7 +88,7 @@ public class TokenStore {
     public String getCookieString() {
         lock.readLock().lock();
         try {
-            return buildCookieString();
+            return buildCookieString(null);
         } finally {
             lock.readLock().unlock();
         }
@@ -90,20 +98,19 @@ public class TokenStore {
     public String getCookieStringForUrl(String url) {
         lock.readLock().lock();
         try {
-            return ScopeMatcher.matchesUrl(url, target) ? buildCookieString() : "";
+            return ScopeMatcher.matchesUrl(url, target) ? buildCookieString(URI.create(url)) : "";
         } finally {
             lock.readLock().unlock();
         }
     }
 
-    private String buildCookieString() {
-        if (cookies.isEmpty()) return "";
-        StringBuilder sb = new StringBuilder();
-        for (Map.Entry<String, String> entry : cookies.entrySet()) {
-            if (sb.length() > 0) sb.append("; ");
-            sb.append(entry.getKey()).append("=").append(entry.getValue());
-        }
-        return sb.toString();
+    private String buildCookieString(URI destination) {
+        long now = Instant.now().getEpochSecond();
+        return cookies.values().stream()
+                .filter(cookie -> cookie.expiresAt() > now && (destination == null || cookie.matches(destination)))
+                .sorted(Comparator.comparingInt((StoredCookie cookie) -> cookie.path().length()).reversed())
+                .map(cookie -> cookie.name() + "=" + cookie.value())
+                .collect(Collectors.joining("; "));
     }
 
     // --- JWT ---
@@ -250,7 +257,7 @@ public class TokenStore {
     public Snapshot getSnapshot() {
         lock.readLock().lock();
         try {
-            return snapshotUnderLock();
+            return snapshotUnderLock(null);
         } finally {
             lock.readLock().unlock();
         }
@@ -264,30 +271,29 @@ public class TokenStore {
     public Snapshot getSnapshotForUrl(String url) {
         lock.readLock().lock();
         try {
-            return ScopeMatcher.matchesUrl(url, target) ? snapshotUnderLock() : null;
+            return ScopeMatcher.matchesUrl(url, target) ? snapshotUnderLock(URI.create(url)) : null;
         } finally {
             lock.readLock().unlock();
         }
     }
 
-    private Snapshot snapshotUnderLock() {
-        return new Snapshot(buildCookieString(), jwt, csrfHeaderName, csrfValue,
+    private Snapshot snapshotUnderLock(URI destination) {
+        return new Snapshot(buildCookieString(destination), jwt, csrfHeaderName, csrfValue,
                 Collections.unmodifiableMap(new LinkedHashMap<>(customHeaders)));
     }
 
     /**
      * Commit ordinary captured traffic only while its source still matches the local scope.
      * Returns false, without changing any state, when the source is no longer eligible.
-     * A true result means the source was accepted; an empty batch may still be a no-op.
+     * A true result means at least one change was processed.
      */
-    public boolean applyCapturedResponseForUrl(String sourceUrl, Map<String, String> newCookies,
+    public boolean applyCapturedResponseForUrl(String sourceUrl, List<String> cookieHeaders,
                                                 String newJwt, String newCsrfValue,
                                                 Map<String, String> newCustomHeaders) {
         lock.writeLock().lock();
         try {
             if (!ScopeMatcher.matchesUrl(sourceUrl, target)) return false;
-            applyCapturedResponse(newCookies, newJwt, newCsrfValue, newCustomHeaders);
-            return true;
+            return applyCapturedResponse(URI.create(sourceUrl), cookieHeaders, newJwt, newCsrfValue, newCustomHeaders);
         } finally {
             lock.writeLock().unlock();
         }
@@ -298,14 +304,17 @@ public class TokenStore {
      * selected. Unlike ordinary traffic, the login/SSO host may be outside that target.
      * Returns false without changing state if the target changed or was not configured.
      */
-    public boolean applyLoginResponseForTarget(String expectedTarget, Map<String, String> newCookies,
+    public boolean applyLoginResponseForTarget(String expectedTarget, String sourceUrl, List<String> cookieHeaders,
                                                 String newJwt, String newCsrfValue,
                                                 Map<String, String> newCustomHeaders) {
         lock.writeLock().lock();
         try {
             if (expectedTarget == null || expectedTarget.isBlank() || !target.equals(expectedTarget)) return false;
-            applyCapturedResponse(newCookies, newJwt, newCsrfValue, newCustomHeaders);
-            return true;
+            URI source = URI.create(sourceUrl);
+            // An identity provider may issue an application token alongside its own login cookie.
+            // Only application cookies belong in the shared snapshot.
+            return applyCapturedResponse(source, ScopeMatcher.matchesHost(source.getHost(), target) ? cookieHeaders : List.of(),
+                    newJwt, newCsrfValue, newCustomHeaders);
         } finally {
             lock.writeLock().unlock();
         }
@@ -319,40 +328,39 @@ public class TokenStore {
      * never observes a partial update — either the whole batch from this exchange is visible, or
      * none of it is.
      */
-    public void applyCapturedResponse(Map<String, String> newCookies, String newJwt,
-                                       String newCsrfValue, Map<String, String> newCustomHeaders) {
-        boolean hasCookies = newCookies != null && !newCookies.isEmpty();
+    private boolean applyCapturedResponse(URI source, List<String> cookieHeaders, String newJwt,
+                                          String newCsrfValue, Map<String, String> newCustomHeaders) {
+        Instant now = Instant.now();
+        long seconds = now.getEpochSecond();
+        cookies.values().removeIf(cookie -> cookie.expiresAt() <= seconds);
+        boolean hasCookies = false;
+        for (String header : cookieHeaders) {
+            StoredCookie cookie = SetCookieParser.parse(header, source, target, now);
+            if (cookie == null) continue;
+            StoredCookie previous = cookies.get(cookie.key());
+            if (previous != null && previous.secure() && !"https".equalsIgnoreCase(source.getScheme())) continue;
+            if (cookie.expiresAt() <= seconds) cookies.remove(cookie.key());
+            else cookies.put(cookie.key(), cookie);
+            hasCookies = true;
+        }
         boolean hasJwt = newJwt != null && !newJwt.isEmpty();
         boolean hasCsrf = newCsrfValue != null && !newCsrfValue.isEmpty();
         boolean hasCustomHeaders = newCustomHeaders != null && !newCustomHeaders.isEmpty();
+        if (!hasCookies && !hasJwt && !hasCsrf && !hasCustomHeaders) return false;
 
-        if (!hasCookies && !hasJwt && !hasCsrf && !hasCustomHeaders) {
-            return;
-        }
-
-        lock.writeLock().lock();
-        try {
-            if (hasCookies) {
-                for (Map.Entry<String, String> cookie : newCookies.entrySet()) {
-                    if (cookie.getValue() == null || cookie.getValue().isEmpty()) cookies.remove(cookie.getKey());
-                    else cookies.put(cookie.getKey(), cookie.getValue());
+        if (hasJwt) this.jwt = newJwt;
+        if (hasCsrf) this.csrfValue = newCsrfValue;
+        if (hasCustomHeaders) {
+            for (Map.Entry<String, String> header : newCustomHeaders.entrySet()) {
+                // A capture that began before a watch was removed must not restore it.
+                if (isWatchedHeader(header.getKey())) {
+                    customHeaders.keySet().removeIf(name -> name.equalsIgnoreCase(header.getKey()));
+                    customHeaders.put(header.getKey(), header.getValue());
                 }
             }
-            if (hasJwt) this.jwt = newJwt;
-            if (hasCsrf) this.csrfValue = newCsrfValue;
-            if (hasCustomHeaders) {
-                for (Map.Entry<String, String> header : newCustomHeaders.entrySet()) {
-                    // A capture that began before a watch was removed must not restore it.
-                    if (isWatchedHeader(header.getKey())) {
-                        customHeaders.keySet().removeIf(name -> name.equalsIgnoreCase(header.getKey()));
-                        customHeaders.put(header.getKey(), header.getValue());
-                    }
-                }
-            }
-            updatedAt = Instant.now();
-        } finally {
-            lock.writeLock().unlock();
         }
+        updatedAt = now;
+        return true;
     }
 
     // --- Timestamp ---
@@ -371,7 +379,8 @@ public class TokenStore {
         try {
             TokenPayload payload = new TokenPayload();
             payload.target = this.target;
-            payload.cookies = new ConcurrentHashMap<>(this.cookies);
+            long now = Instant.now().getEpochSecond();
+            payload.cookies = cookies.values().stream().filter(cookie -> cookie.expiresAt() > now).toList();
             payload.jwt = this.jwt;
             payload.csrfHeaderName = this.csrfHeaderName;
             payload.csrfValue = this.csrfValue;
@@ -394,25 +403,33 @@ public class TokenStore {
             throw new IllegalArgumentException("Token response must be a JSON object");
         }
         JsonObject object = document.getAsJsonObject();
-        Map<String, String> nextCookies = readTokenMap(object, "cookies", true, false);
-        String nextJwt = readString(object, "jwt");
-        String nextCsrfHeader = readString(object, "csrfHeaderName");
-        String nextCsrfValue = readString(object, "csrfValue");
-        // Older leaders may omit the custom-header feature entirely.
-        Map<String, String> nextCustomHeaders = readTokenMap(object, "customHeaders", false, true);
-        validateHeaderValue(nextJwt);
-        validateHeaderValue(nextCsrfValue);
-        if (!nextCsrfHeader.isEmpty()) validateName(nextCsrfHeader);
-        if (nextCsrfHeader.isEmpty() && !nextCsrfValue.isEmpty()) {
-            throw new IllegalArgumentException("CSRF value requires a header name");
-        }
-        if (object.has("target")) readString(object, "target");
-        if (object.has("updatedAt")) Instant.parse(readString(object, "updatedAt"));
-
         lock.writeLock().lock();
         try {
-            // Scope is a local security boundary. Never let a remote leader change where
-            // this follower injects credentials.
+            JsonElement version = object.get("version");
+            if (version == null || !version.isJsonPrimitive() || !version.getAsJsonPrimitive().isString()
+                    || !"2".equals(version.getAsString())) {
+                clearTokens();
+                throw new IllegalArgumentException("Incompatible token format. Update both peers to the same version.");
+            }
+            JsonElement scope = object.get("target");
+            if (scope == null || !scope.isJsonPrimitive() || !scope.getAsJsonPrimitive().isString()
+                    || !ScopeMatcher.equivalentScopes(target, scope.getAsString())) {
+                clearTokens();
+                throw new IllegalArgumentException("Target domains differ. Use the same target domains on both peers.");
+            }
+            String nextJwt = readString(object, "jwt");
+            String nextCsrfHeader = readString(object, "csrfHeaderName");
+            String nextCsrfValue = readString(object, "csrfValue");
+            Map<String, String> nextCustomHeaders = readCustomHeaders(object);
+            validateHeaderValue(nextJwt);
+            validateHeaderValue(nextCsrfValue);
+            if (!nextCsrfHeader.isEmpty()) validateName(nextCsrfHeader);
+            if (nextCsrfHeader.isEmpty() && !nextCsrfValue.isEmpty()) {
+                throw new IllegalArgumentException("CSRF value requires a header name");
+            }
+
+            if (object.has("updatedAt")) Instant.parse(readString(object, "updatedAt"));
+            Map<CookieKey, StoredCookie> nextCookies = readCookies(object);
             cookies.clear();
             cookies.putAll(nextCookies);
             jwt = nextJwt;
@@ -426,6 +443,36 @@ public class TokenStore {
         }
     }
 
+    private static Map<CookieKey, StoredCookie> readCookies(JsonObject object) {
+        JsonElement entries = object.get("cookies");
+        if (entries == null || !entries.isJsonArray()) {
+            throw new IllegalArgumentException("Expected a list of scoped cookies");
+        }
+        Map<CookieKey, StoredCookie> next = new LinkedHashMap<>();
+        long now = Instant.now().getEpochSecond();
+        for (JsonElement entry : entries.getAsJsonArray()) {
+            if (!entry.isJsonObject()) throw new IllegalArgumentException("Invalid cookie entry");
+            JsonObject cookie = entry.getAsJsonObject();
+            JsonElement expiresAt = cookie.get("expiresAt");
+            if (expiresAt == null || !expiresAt.isJsonPrimitive() || !expiresAt.getAsJsonPrimitive().isNumber()) {
+                throw new IllegalArgumentException("Missing cookie expiration");
+            }
+            StoredCookie parsed = new StoredCookie(readString(cookie, "name"), readString(cookie, "value"),
+                    readString(cookie, "domain"), readBoolean(cookie, "hostOnly"), readString(cookie, "path"),
+                    readBoolean(cookie, "secure"), Long.parseLong(expiresAt.getAsString()));
+            if (parsed.expiresAt() > now) next.put(parsed.key(), parsed);
+        }
+        return next;
+    }
+
+    private static boolean readBoolean(JsonObject object, String name) {
+        JsonElement value = object.get(name);
+        if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isBoolean()) {
+            throw new IllegalArgumentException("Invalid cookie field: " + name);
+        }
+        return value.getAsBoolean();
+    }
+
     private static String readString(JsonObject object, String name) {
         JsonElement value = object.get(name);
         if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()) {
@@ -434,12 +481,11 @@ public class TokenStore {
         return value.getAsString();
     }
 
-    private static Map<String, String> readTokenMap(JsonObject object, String name,
-                                                     boolean required, boolean headerMap) {
-        JsonElement element = object.get(name);
-        if (element == null && !required) return Collections.emptyMap();
-        if (element == null || !element.isJsonObject()) {
-            throw new IllegalArgumentException("Token response field must be an object: " + name);
+    private static Map<String, String> readCustomHeaders(JsonObject object) {
+        JsonElement element = object.get("customHeaders");
+        if (element == null) return Collections.emptyMap();
+        if (!element.isJsonObject()) {
+            throw new IllegalArgumentException("Expected an object of custom headers");
         }
         Map<String, String> values = new LinkedHashMap<>();
         JsonObject entries = element.getAsJsonObject();
@@ -447,10 +493,7 @@ public class TokenStore {
             validateName(key);
             String value = readString(entries, key);
             validateHeaderValue(value);
-            if (!headerMap && value.indexOf(';') >= 0) {
-                throw new IllegalArgumentException("Invalid cookie value in token response");
-            }
-            if (headerMap && values.keySet().stream().anyMatch(existing -> existing.equalsIgnoreCase(key))) {
+            if (values.keySet().stream().anyMatch(existing -> existing.equalsIgnoreCase(key))) {
                 throw new IllegalArgumentException("Duplicate custom header in token response");
             }
             values.put(key, value);
@@ -459,8 +502,9 @@ public class TokenStore {
     }
 
     private static void validateName(String name) {
-        if (!name.matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+")) {
-            throw new IllegalArgumentException("Invalid cookie or header name in token response");
+        if ("Cookie".equalsIgnoreCase(name) || "Set-Cookie".equalsIgnoreCase(name)
+                || !name.matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+")) {
+            throw new IllegalArgumentException("Invalid token header name in token response");
         }
     }
 
@@ -506,9 +550,7 @@ public class TokenStore {
             if (cookies.isEmpty()) {
                 sb.append("  (none)\n");
             } else {
-                for (Map.Entry<String, String> entry : cookies.entrySet()) {
-                    sb.append("  ").append(entry.getKey()).append(" = ").append(entry.getValue()).append("\n");
-                }
+                sb.append("  ").append(buildCookieString(null)).append("\n");
             }
 
             sb.append("\n=== JWT ===\n");
@@ -549,7 +591,8 @@ public class TokenStore {
      */
     private static class TokenPayload {
         String target;
-        Map<String, String> cookies;
+        final String version = "2";
+        List<StoredCookie> cookies;
         String jwt;
         String csrfHeaderName;
         String csrfValue;

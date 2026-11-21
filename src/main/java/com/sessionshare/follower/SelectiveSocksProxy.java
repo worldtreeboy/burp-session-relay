@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Loopback-only SOCKS5 proxy used by the follower. Target hosts are connected through
- * the leader's authenticated SOCKS5 relay; all other hosts are connected directly.
+ * the leader's authenticated SOCKS5 relay. Unlisted hostnames connect directly.
  */
 public final class SelectiveSocksProxy {
     private final MontoyaApi api;
@@ -28,12 +28,18 @@ public final class SelectiveSocksProxy {
     private volatile int leaderPort = 1080;
     private volatile String password = "";
     private volatile String scope = "";
+    private volatile boolean allowDirectIp;
 
     public SelectiveSocksProxy(MontoyaApi api) { this.api = api; }
     public boolean isRunning() { return running; }
 
-    public synchronized void start(int localPort, String leaderHost, int leaderPort,
+    public void start(int localPort, String leaderHost, int leaderPort,
                                    String password, String scope) throws IOException {
+        start(localPort, leaderHost, leaderPort, password, scope, false);
+    }
+
+    public synchronized void start(int localPort, String leaderHost, int leaderPort,
+                                   String password, String scope, boolean allowDirectIp) throws IOException {
         if (running) return;
         if (password == null || password.isBlank()) throw new IllegalArgumentException("Password is required");
         if (password.getBytes(StandardCharsets.UTF_8).length > 255) {
@@ -44,6 +50,7 @@ public final class SelectiveSocksProxy {
         this.leaderPort = leaderPort;
         this.password = password;
         this.scope = scope;
+        this.allowDirectIp = allowDirectIp;
         serverSocket = new ServerSocket(localPort, 50, InetAddress.getByName("127.0.0.1"));
         ServerSocket listener = serverSocket;
         executor = new ThreadPoolExecutor(32, 32, 0, TimeUnit.MILLISECONDS,
@@ -113,6 +120,12 @@ public final class SelectiveSocksProxy {
             }
 
             boolean viaLeader = ScopeMatcher.matchesHost(requested.host, scope);
+            if (!viaLeader && !allowDirectIp && ScopeMatcher.isIpLiteral(requested.host)) {
+                api.logging().logToError("[Selective SOCKS] Blocked unlisted IP " + requested.host
+                        + ". Enable DNS through SOCKS in Burp, or add the target IP to the routing list.");
+                reply(out, 2);
+                return;
+            }
             destination = viaLeader ? connectViaLeader(requested, listener) : connectDirect(requested, listener);
             reply(out, 0);
             relaying = true;
@@ -184,7 +197,7 @@ public final class SelectiveSocksProxy {
         String host;
         if (type == 1) host = InetAddress.getByAddress(readFully(in, 4)).getHostAddress();
         else if (type == 3) host = new String(readFully(in, read(in)), StandardCharsets.UTF_8);
-        else if (type == 4) host = InetAddress.getByAddress(readFully(in, 16)).getHostAddress();
+        else if (type == 4) host = Inet6Address.getByAddress(null, readFully(in, 16), -1).getHostAddress();
         else return null;
         int port = (read(in) << 8) | read(in);
         if (host.isBlank() || port == 0) throw new IOException("Invalid destination");

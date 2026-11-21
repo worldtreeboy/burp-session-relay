@@ -26,9 +26,10 @@ class TokenSharingIntegrationTest {
     @Test void followerImportsAuthenticatedTokensFromLeader() throws Exception {
         TokenStore source = new TokenStore();
         source.setTarget("localhost");
-        source.applyCapturedResponse(java.util.Map.of(), "synthetic-token", null, java.util.Map.of());
+        source.applyCapturedResponseForUrl("https://localhost/", java.util.List.of(), "synthetic-token", null, java.util.Map.of());
         TokenServer leader = new TokenServer(api(), source);
         TokenStore destination = new TokenStore();
+        destination.setTarget("localhost");
         TokenPoller follower = new TokenPoller(api(), destination);
         try {
             leader.setPassword("loopback-password");
@@ -84,9 +85,10 @@ class TokenSharingIntegrationTest {
         }
     }
 
-    @Test void followerDoesNotFollowRedirectsOrReplaceTokens() throws Exception {
+    @Test void followerRefusesRedirectsAndClearsPreviouslySharedTokens() throws Exception {
         TokenStore store = new TokenStore();
-        store.applyCapturedResponse(java.util.Map.of(), "existing-synthetic-token", null, java.util.Map.of());
+        store.setTarget("localhost");
+        store.applyCapturedResponseForUrl("https://localhost/", java.util.List.of(), "existing-synthetic-token", null, java.util.Map.of());
         TokenPoller follower = new TokenPoller(api(), store);
         ExecutorService worker = Executors.newSingleThreadExecutor(r -> {
             Thread thread = new Thread(r, "Loopback-token-redirect-test");
@@ -125,7 +127,7 @@ class TokenSharingIntegrationTest {
 
             assertNull(follower.getLastFetchTime());
             assertTrue(follower.getLastError().contains("redirect"));
-            assertEquals("existing-synthetic-token", store.getJwt());
+            assertEquals("", store.getJwt());
             assertThrows(SocketTimeoutException.class, redirectDestination::accept);
         } finally {
             follower.stop();

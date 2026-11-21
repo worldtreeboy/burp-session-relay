@@ -6,10 +6,6 @@ import burp.api.montoya.http.message.requests.HttpRequest;
 
 import com.sessionshare.model.TokenStore;
 import com.sessionshare.util.ScopeMatcher;
-import com.sessionshare.util.SetCookieParser;
-import java.time.Instant;
-
-import java.util.Map;
 
 /**
  * HTTP handler for the Session Manager feature.
@@ -58,7 +54,7 @@ public class SessionHttpHandler implements HttpHandler {
         }
 
         // ---- Inject latest tokens ----
-        HttpRequest modified = injectTokens(request);
+        HttpRequest modified = TokenRequest.inject(request, tokenStore);
         return RequestToBeSentAction.continueWith(modified);
     }
 
@@ -94,44 +90,6 @@ public class SessionHttpHandler implements HttpHandler {
         return ResponseReceivedAction.continueWith(response);
     }
 
-    // ==================== Token injection ====================
-
-    /**
-     * Reads a single atomic snapshot rather than each field separately, so a request never
-     * mixes a fresh field with a stale one from a capture that lands mid-build.
-     */
-    private HttpRequest injectTokens(HttpRequest request) {
-        HttpRequest modified = request;
-        TokenStore.Snapshot snapshot = tokenStore.getSnapshotForUrl(request.url());
-        if (snapshot == null) return request;
-
-        // Cookies
-        if (!snapshot.cookieString.isEmpty()) {
-            modified = modified.withRemovedHeader("Cookie")
-                    .withAddedHeader("Cookie", snapshot.cookieString);
-        }
-
-        // JWT as Bearer token
-        if (snapshot.jwt != null && !snapshot.jwt.isEmpty()) {
-            modified = modified.withRemovedHeader("Authorization")
-                    .withAddedHeader("Authorization", "Bearer " + snapshot.jwt);
-        }
-
-        // CSRF token
-        if (!snapshot.csrfHeaderName.isEmpty() && !snapshot.csrfValue.isEmpty()) {
-            modified = modified.withRemovedHeader(snapshot.csrfHeaderName)
-                    .withAddedHeader(snapshot.csrfHeaderName, snapshot.csrfValue);
-        }
-
-        // Custom headers
-        for (Map.Entry<String, String> entry : snapshot.customHeaders.entrySet()) {
-            modified = modified.withRemovedHeader(entry.getKey())
-                    .withAddedHeader(entry.getKey(), entry.getValue());
-        }
-
-        return modified;
-    }
-
     // ==================== Token capture from responses ====================
 
     /**
@@ -140,44 +98,9 @@ public class SessionHttpHandler implements HttpHandler {
      */
     private void captureTokensFromResponse(HttpResponseReceived response) {
         try {
-            Map<String, String> capturedCookies = new java.util.LinkedHashMap<>();
-            Map<String, String> capturedCustomHeaders = new java.util.LinkedHashMap<>();
-            String capturedJwt = null;
-            String capturedCsrf = null;
-
-            String csrfHeader = tokenStore.getCsrfHeaderName();
-
-            for (var header : response.headers()) {
-                String name = header.name();
-                String value = header.value();
-
-                // Set-Cookie
-                if ("Set-Cookie".equalsIgnoreCase(name)) {
-                    SetCookieParser.ParsedCookie cookie = SetCookieParser.parse(value, Instant.now());
-                    if (cookie != null) capturedCookies.put(cookie.name(), cookie.value());
-                }
-
-                // JWT from any header
-                java.util.regex.Matcher jwtMatcher =
-                        java.util.regex.Pattern.compile("eyJ[A-Za-z0-9_-]+\\.eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+")
-                                .matcher(value);
-                if (jwtMatcher.find()) {
-                    capturedJwt = jwtMatcher.group();
-                }
-
-                // CSRF header
-                if (!csrfHeader.isEmpty() && csrfHeader.equalsIgnoreCase(name)) {
-                    capturedCsrf = value.trim();
-                }
-
-                // Custom watched headers
-                if (tokenStore.isWatchedHeader(name)) {
-                    capturedCustomHeaders.put(name, value.trim());
-                }
-            }
-
-            tokenStore.applyCapturedResponseForUrl(response.initiatingRequest().url(), capturedCookies,
-                    capturedJwt, capturedCsrf, capturedCustomHeaders);
+            CapturedTokens tokens = CapturedTokens.read(tokenStore, response.headers(), null, false);
+            tokenStore.applyCapturedResponseForUrl(response.initiatingRequest().url(), tokens.cookies(), tokens.jwt(),
+                    tokens.csrf(), tokens.customHeaders());
         } catch (Exception e) {
             api.logging().logToError("[SessionManager] Error capturing tokens from response: " + e.getMessage());
         }

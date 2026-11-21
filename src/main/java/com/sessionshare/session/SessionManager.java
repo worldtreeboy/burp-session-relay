@@ -1,22 +1,16 @@
 package com.sessionshare.session;
 
 import burp.api.montoya.MontoyaApi;
-import burp.api.montoya.http.message.HttpHeader;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.sessionshare.model.TokenStore;
-import com.sessionshare.util.SetCookieParser;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * Session Manager — auto-refreshes session tokens when they expire.
@@ -53,9 +47,6 @@ public class SessionManager {
     // Status tracking
     private volatile String lastRefreshStatus = "Not yet refreshed";
     private volatile int refreshCount = 0;
-
-    private static final Pattern JWT_PATTERN =
-            Pattern.compile("eyJ[A-Za-z0-9_-]+\\.eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+");
 
     public SessionManager(MontoyaApi api, TokenStore tokenStore) {
         this.api = api;
@@ -211,7 +202,7 @@ public class SessionManager {
 
             if (statusCode >= 200 && statusCode < 300) {
                 // Success — extract tokens from response
-                boolean capturedTokens = extractTokensFromResponse(response, expectedTarget);
+                boolean capturedTokens = extractTokensFromResponse(response, expectedTarget, loginRequest.url());
                 if (!capturedTokens) {
                     lastRefreshStatus = "Failed: login returned HTTP " + statusCode + " but no session tokens were accepted";
                     api.logging().logToError("[SessionManager] Login response had no eligible session tokens; the target may have changed");
@@ -275,12 +266,7 @@ public class SessionManager {
             // Inject current cookies into login request
             // (some apps require an existing session cookie for re-login)
             String cookieString = tokenStore.getCookieStringForUrl(request.url());
-            if (!cookieString.isEmpty()) {
-                request = request.withRemovedHeader("Cookie")
-                        .withAddedHeader("Cookie", cookieString);
-            }
-
-            return request;
+            return TokenRequest.withCookies(request, cookieString);
         } catch (Exception e) {
             api.logging().logToError("[SessionManager] Error building login request: " + e.getMessage());
             return null;
@@ -291,91 +277,9 @@ public class SessionManager {
      * Extract cookies, JWTs, and CSRF tokens from the login macro response, then apply them
      * to the token store as a single atomic batch — see TokenStore.applyCapturedResponse for why.
      */
-    private boolean extractTokensFromResponse(HttpResponse response, String expectedTarget) {
-        Map<String, String> capturedCookies = new LinkedHashMap<>();
-        Map<String, String> capturedCustomHeaders = new LinkedHashMap<>();
-        String capturedJwt = null;
-        String capturedCsrf = null;
-
-        String csrfHeader = tokenStore.getCsrfHeaderName();
-
-        for (HttpHeader header : response.headers()) {
-            String name = header.name();
-            String value = header.value();
-
-            // Set-Cookie headers → store cookies
-            if ("Set-Cookie".equalsIgnoreCase(name)) {
-                SetCookieParser.ParsedCookie cookie = SetCookieParser.parse(value, Instant.now());
-                if (cookie != null) {
-                    capturedCookies.put(cookie.name(), cookie.value());
-                    api.logging().logToOutput("[SessionManager] "
-                            + (cookie.deleted() ? "Deleted" : "Captured") + " cookie: " + cookie.name());
-                }
-
-                // Check if cookie value itself is a JWT
-                Matcher jwtMatcher = JWT_PATTERN.matcher(value);
-                if (jwtMatcher.find()) {
-                    capturedJwt = jwtMatcher.group();
-                    api.logging().logToOutput("[SessionManager] Captured JWT from Set-Cookie");
-                }
-            }
-
-            // Authorization header → JWT
-            if ("Authorization".equalsIgnoreCase(name)) {
-                Matcher jwtMatcher = JWT_PATTERN.matcher(value);
-                if (jwtMatcher.find()) {
-                    capturedJwt = jwtMatcher.group();
-                    api.logging().logToOutput("[SessionManager] Captured JWT from Authorization header");
-                }
-            }
-
-            // Any header containing a JWT
-            Matcher jwtMatcher = JWT_PATTERN.matcher(value);
-            if (jwtMatcher.find() && !"Set-Cookie".equalsIgnoreCase(name)
-                    && !"Authorization".equalsIgnoreCase(name)) {
-                capturedJwt = jwtMatcher.group();
-                api.logging().logToOutput("[SessionManager] Captured JWT from header: " + name);
-            }
-
-            // CSRF token from configured header
-            if (!csrfHeader.isEmpty() && csrfHeader.equalsIgnoreCase(name)) {
-                capturedCsrf = value.trim();
-                api.logging().logToOutput("[SessionManager] Captured CSRF from header: " + csrfHeader);
-            }
-
-            // Custom watched headers
-            if (tokenStore.isWatchedHeader(name)) {
-                capturedCustomHeaders.put(name, value.trim());
-                api.logging().logToOutput("[SessionManager] Captured custom header: " + name);
-            }
-        }
-
-        // Check response body for JWTs (some login APIs return JWT in JSON body)
-        String body = response.bodyToString();
-        if (body != null && !body.isEmpty()) {
-            // Look for JWT in body
-            Matcher jwtMatcher = JWT_PATTERN.matcher(body);
-            if (jwtMatcher.find()) {
-                capturedJwt = jwtMatcher.group();
-                api.logging().logToOutput("[SessionManager] Captured JWT from response body");
-            }
-
-            // Look for CSRF in meta tags
-            if (!csrfHeader.isEmpty()) {
-                Pattern metaPattern = Pattern.compile(
-                        "<meta[^>]+name=[\"'](?:csrf[_-]?token|_csrf|xsrf[_-]?token)[\"'][^>]+content=[\"']([^\"']+)[\"']",
-                        Pattern.CASE_INSENSITIVE);
-                Matcher metaMatcher = metaPattern.matcher(body);
-                if (metaMatcher.find()) {
-                    capturedCsrf = metaMatcher.group(1);
-                    api.logging().logToOutput("[SessionManager] Captured CSRF from meta tag");
-                }
-            }
-        }
-
-        boolean accepted = tokenStore.applyLoginResponseForTarget(expectedTarget, capturedCookies,
-                capturedJwt, capturedCsrf, capturedCustomHeaders);
-        return accepted && (!capturedCookies.isEmpty() || capturedJwt != null || capturedCsrf != null
-                || !capturedCustomHeaders.isEmpty());
+    private boolean extractTokensFromResponse(HttpResponse response, String expectedTarget, String sourceUrl) {
+        CapturedTokens tokens = CapturedTokens.read(tokenStore, response.headers(), response.bodyToString(), true);
+        return tokenStore.applyLoginResponseForTarget(expectedTarget, sourceUrl, tokens.cookies(),
+                tokens.jwt(), tokens.csrf(), tokens.customHeaders());
     }
 }

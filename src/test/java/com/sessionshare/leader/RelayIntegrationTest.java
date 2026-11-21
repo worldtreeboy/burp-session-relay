@@ -121,6 +121,54 @@ class RelayIntegrationTest {
         }
     }
 
+    @Test void unlistedNumericDestinationsRequireExplicitDirectRouting() throws Exception {
+        SelectiveSocksProxy follower = new SelectiveSocksProxy(api());
+        try (ServerSocket target = new ServerSocket(0, 1, LOOPBACK)) {
+            follower.start(0, "127.0.0.1", 1, PASSWORD, "example.test");
+            try (Socket client = connect(port(follower))) {
+                noAuthentication(client);
+                assertEquals(2, requestConnect(client, InetAddress.getByName("127.0.0.1"), target.getLocalPort()));
+            }
+            target.setSoTimeout(200);
+            assertThrows(java.net.SocketTimeoutException.class, target::accept);
+            follower.stop();
+            follower.start(0, "127.0.0.1", 1, PASSWORD, "example.test", true);
+            try (Socket client = connect(port(follower))) {
+                noAuthentication(client);
+                assertEquals(0, requestConnect(client, InetAddress.getByName("127.0.0.1"), target.getLocalPort()));
+                try (Socket accepted = target.accept()) {
+                    assertTrue(accepted.getInetAddress().isLoopbackAddress());
+                }
+            }
+        } finally {
+            follower.stop();
+        }
+    }
+
+    @Test void bracketedIpv6ScopeRoutesBinaryAddressThroughLeader() throws Exception {
+        InetAddress ipv6Loopback = InetAddress.getByName("::1");
+        try (ServerSocket target = new ServerSocket()) {
+            try {
+                target.bind(new java.net.InetSocketAddress(ipv6Loopback, 0));
+            } catch (java.net.SocketException unavailable) {
+                org.junit.jupiter.api.Assumptions.abort("IPv6 loopback unavailable: " + unavailable);
+            }
+            SocksRelayServer leader = leader("[::1]");
+            SelectiveSocksProxy follower = new SelectiveSocksProxy(api());
+            try {
+                follower.start(0, "127.0.0.1", port(leader), PASSWORD, "[::1]");
+                try (Socket client = connect(port(follower))) {
+                    noAuthentication(client);
+                    assertEquals(0, requestConnect(client, ipv6Loopback, target.getLocalPort()));
+                    assertEquals(1, leader.getTotalConnections());
+                }
+            } finally {
+                follower.stop();
+                leader.stop();
+            }
+        }
+    }
+
     @Test void leaderRequiresAuthenticationAndRestrictsScope() throws Exception {
         SocksRelayServer leader = leader("unused.invalid");
         try {
@@ -195,6 +243,19 @@ class RelayIntegrationTest {
         OutputStream out = client.getOutputStream();
         out.write(new byte[]{5, 1, 0, 3, (byte) name.length});
         out.write(name);
+        return completeConnect(client, port);
+    }
+
+    private static int requestConnect(Socket client, InetAddress address, int port) throws IOException {
+        byte[] bytes = address.getAddress();
+        OutputStream out = client.getOutputStream();
+        out.write(new byte[]{5, 1, 0, (byte) (bytes.length == 16 ? 4 : 1)});
+        out.write(bytes);
+        return completeConnect(client, port);
+    }
+
+    private static int completeConnect(Socket client, int port) throws IOException {
+        OutputStream out = client.getOutputStream();
         out.write(port >>> 8);
         out.write(port & 255);
         byte[] reply = client.getInputStream().readNBytes(10);

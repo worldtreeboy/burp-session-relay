@@ -45,6 +45,16 @@ final class UiValidation {
         return scope;
     }
 
+    static String credentialScope(String text) {
+        String domains = scope(text);
+        for (String domain : domains.split(",")) {
+            if (domain.trim().equals("*")) {
+                throw new IllegalArgumentException("Replace * with the application’s domains before sharing or refreshing credentials.");
+            }
+        }
+        return domains;
+    }
+
     static String loginUrl(String text) {
         String value = text.trim();
         try {
@@ -55,6 +65,14 @@ final class UiValidation {
         } catch (IllegalArgumentException ignored) {
         }
         throw new IllegalArgumentException("Enter a complete HTTP or HTTPS login URL without embedded credentials or a fragment.");
+    }
+
+    static String tokenHeaderName(String text) {
+        String name = headerName(text);
+        if (name.equalsIgnoreCase("Cookie") || name.equalsIgnoreCase("Set-Cookie")) {
+            throw new IllegalArgumentException("Cookies are captured automatically. Choose a different response header.");
+        }
+        return name;
     }
 
     static String headerName(String text) {

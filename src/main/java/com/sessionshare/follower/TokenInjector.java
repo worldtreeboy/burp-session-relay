@@ -5,9 +5,8 @@ import burp.api.montoya.http.handler.*;
 import burp.api.montoya.http.message.requests.HttpRequest;
 
 import com.sessionshare.model.TokenStore;
+import com.sessionshare.session.TokenRequest;
 import com.sessionshare.util.ScopeMatcher;
-
-import java.util.Map;
 
 /**
  * Follower-side HTTP handler that injects the latest tokens (fetched from the leader)
@@ -48,7 +47,7 @@ public class TokenInjector implements HttpHandler {
             return RequestToBeSentAction.continueWith(request);
         }
 
-        HttpRequest modified = injectTokens(request);
+        HttpRequest modified = TokenRequest.inject(request, tokenStore);
         return RequestToBeSentAction.continueWith(modified);
     }
 
@@ -72,45 +71,6 @@ public class TokenInjector implements HttpHandler {
         }
 
         return ResponseReceivedAction.continueWith(response);
-    }
-
-    /**
-     * Inject cookies, JWT, and CSRF tokens into the outgoing request.
-     *
-     * Reads a single atomic snapshot rather than each field separately — otherwise a poll
-     * update landing mid-build could pair a fresh cookie with a stale custom header (or vice
-     * versa), which breaks apps that bind the two together.
-     */
-    private HttpRequest injectTokens(HttpRequest request) {
-        HttpRequest modified = request;
-        TokenStore.Snapshot snapshot = tokenStore.getSnapshotForUrl(request.url());
-        if (snapshot == null) return request;
-
-        // Inject cookies
-        if (!snapshot.cookieString.isEmpty()) {
-            modified = modified.withRemovedHeader("Cookie")
-                    .withAddedHeader("Cookie", snapshot.cookieString);
-        }
-
-        // Inject JWT as Bearer token
-        if (snapshot.jwt != null && !snapshot.jwt.isEmpty()) {
-            modified = modified.withRemovedHeader("Authorization")
-                    .withAddedHeader("Authorization", "Bearer " + snapshot.jwt);
-        }
-
-        // Inject CSRF token
-        if (!snapshot.csrfHeaderName.isEmpty() && !snapshot.csrfValue.isEmpty()) {
-            modified = modified.withRemovedHeader(snapshot.csrfHeaderName)
-                    .withAddedHeader(snapshot.csrfHeaderName, snapshot.csrfValue);
-        }
-
-        // Inject custom headers
-        for (Map.Entry<String, String> entry : snapshot.customHeaders.entrySet()) {
-            modified = modified.withRemovedHeader(entry.getKey())
-                    .withAddedHeader(entry.getKey(), entry.getValue());
-        }
-
-        return modified;
     }
 
     /**

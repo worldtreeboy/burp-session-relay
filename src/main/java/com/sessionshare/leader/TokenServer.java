@@ -58,14 +58,14 @@ public class TokenServer {
 
     /**
      * Start the embedded HTTP server on the given port.
-     * Binds to 0.0.0.0 so followers on the LAN can connect.
+     * Binds to loopback for local clients and encrypted port forwarding.
      */
     public synchronized void start(int port) throws IOException {
-        start(port, null);
+        start(port, InetAddress.getByName("127.0.0.1"));
     }
 
-    // Allows loopback-only integration checks without exposing a test listener to the LAN.
-    synchronized void start(int port, InetAddress bindAddress) throws IOException {
+    /** A null bind address explicitly enables connections on all interfaces. */
+    public synchronized void start(int port, InetAddress bindAddress) throws IOException {
         if (running) {
             api.logging().logToOutput("[Server] Already running.");
             return;

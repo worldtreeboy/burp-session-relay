@@ -1,7 +1,6 @@
 package com.sessionshare.ui;
 
 import burp.api.montoya.MontoyaApi;
-import burp.api.montoya.logging.Logging;
 import com.sessionshare.follower.SelectiveSocksProxy;
 import com.sessionshare.follower.TokenInjector;
 import com.sessionshare.follower.TokenPoller;
@@ -18,7 +17,8 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Proxy;
+import java.net.InetAddress;
+import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -51,11 +51,13 @@ class ConfigPanelTest {
             try (Fixture fixture = new Fixture()) {
                 ConfigPanel panel = fixture.panel;
                 JTabbedPane tabs = find(panel, JTabbedPane.class).get(0);
-                assertEquals(List.of("Session sharing", "VPN routing", "Session manager", "Tokens & status"),
+                assertEquals(List.of("Burp to Burp", "VPN routing", "Session sharing", "Session manager", "Tokens & status"),
                         java.util.stream.IntStream.range(0, tabs.getTabCount()).mapToObj(tabs::getTitleAt).toList());
-                assertTrue(button(panel, "Leader: share my session").isSelected());
-                button(panel, "Follower: use a shared session").doClick();
-                assertTrue(button(panel, "Follower: use a shared session").isSelected());
+                assertEquals("Burp to Burp", tabs.getTitleAt(tabs.getSelectedIndex()));
+                assertTrue(button(panel, "Follower (send traffic)").isSelected());
+                assertTrue(field(panel, "Destination pattern").getText().isEmpty());
+                button(panel, "Leader (receive traffic)").doClick();
+                assertTrue(button(panel, "Leader (receive traffic)").isSelected());
                 for (int index = 0; index < tabs.getTabCount(); index++) tabs.setSelectedIndex(index);
                 assertFalse(fixture.tokenServer.isRunning());
                 assertFalse(fixture.relay.isRunning());
@@ -64,6 +66,139 @@ class ConfigPanelTest {
                 assertFalse(fixture.session.isEnabled());
             }
         });
+    }
+
+    @Test void firstTabSetsReplacesAndRemovesNativeForwarding() throws Exception {
+        onEdt(() -> {
+            try (Fixture fixture = new Fixture()) {
+                ConfigPanel panel = fixture.panel;
+                assertTrue(button(panel, "Follower (send traffic)").isSelected());
+                assertFalse(button(panel, "Remove forwarding").isEnabled());
+                JTextField pattern = field(panel, "Destination pattern");
+                pattern.setText("api.example.test");
+                field(panel, "Receiving Burp host").setText("work-laptop.example.test");
+                button(panel, "Apply to this project").doClick();
+                assertEquals("api.example.test → work-laptop.example.test:8080", UpstreamProxyRules.current(fixture.api));
+                assertTrue(button(panel, "Remove forwarding").isEnabled());
+
+                JComboBox<?> patternChoices = find(panel, JComboBox.class).stream()
+                        .filter(combo -> "Destination pattern".equals(combo.getAccessibleContext().getAccessibleName()))
+                        .findFirst().orElseThrow();
+                patternChoices.setSelectedItem("*");
+                button(panel, "Apply to this project").doClick();
+                button(panel, "Refresh status").doClick();
+                assertEquals("All destinations (*) → work-laptop.example.test:8080", UpstreamProxyRules.current(fixture.api));
+                assertTrue(find(panel, JTextArea.class).stream().anyMatch(area ->
+                        area.getText().contains("All destinations (*) → work-laptop.example.test:8080") && visibleInRole(area)));
+
+                button(panel, "Remove forwarding").doClick();
+                assertEquals("", UpstreamProxyRules.current(fixture.api));
+                assertFalse(fixture.tokenServer.isRunning());
+                assertFalse(fixture.capture.isActive());
+                assertFalse(fixture.relay.isRunning());
+                assertFalse(fixture.proxy.isRunning());
+                assertFalse(fixture.poller.isConnected());
+            }
+        });
+    }
+
+    @Test void leaderCanRouteAndShareIndependently() throws Exception {
+        onEdt(() -> {
+            try (Fixture fixture = new Fixture()) {
+                ConfigPanel panel = fixture.panel;
+                JTabbedPane tabs = find(panel, JTabbedPane.class).get(0);
+                button(panel, "Leader (receive traffic)").doClick();
+                tabs.setSelectedIndex(tabs.indexOfTab("VPN routing"));
+                JTextField targets = field(panel, "Target domains");
+                targets.setText("example.test");
+                int relayPort = freeLoopbackPort();
+                field((Container) tabs.getSelectedComponent(), "Relay port").setText(Integer.toString(relayPort));
+                field((Container) tabs.getSelectedComponent(), "Relay password").setText("relay-secret");
+                assertFalse(button(panel, "Allow connections from other devices").isSelected());
+                button(panel, "Start relay").doClick();
+                assertTrue(fixture.relay.isRunning());
+                assertFalse(fixture.capture.isActive());
+                assertFalse(fixture.tokenServer.isRunning());
+                assertFalse(targets.isEnabled());
+                assertFalse(button(panel, "Allow connections from other devices").isEnabled());
+
+                tabs.setSelectedIndex(tabs.indexOfTab("Session sharing"));
+                Container sharing = (Container) tabs.getSelectedComponent();
+                int tokenPort = freeLoopbackPort();
+                field(sharing, "Token-sharing port").setText(Integer.toString(tokenPort));
+                field(sharing, "Token password").setText("relay-secret");
+                button(panel, "Start sharing").doClick();
+                assertFalse(fixture.capture.isActive());
+                assertFalse(fixture.tokenServer.isRunning());
+                assertTrue(fixture.relay.isRunning());
+                field(sharing, "Token password").setText("token-secret");
+                button(panel, "Start sharing").doClick();
+                assertTrue(fixture.tokenServer.isRunning());
+                assertTrue(fixture.capture.isActive());
+                button(panel, "Stop relay").doClick();
+                assertFalse(fixture.relay.isRunning());
+                assertTrue(fixture.tokenServer.isRunning());
+                assertTrue(fixture.capture.isActive());
+                button(panel, "Start relay").doClick();
+                assertTrue(fixture.relay.isRunning());
+                button(panel, "Stop sharing").doClick();
+                assertTrue(fixture.relay.isRunning());
+                assertFalse(fixture.capture.isActive());
+                assertFalse(fixture.tokenServer.isRunning());
+                button(panel, "Stop relay").doClick();
+                assertTrue(targets.isEnabled());
+            }
+        });
+    }
+
+    @Test void followerCanRouteWithoutConfiguringTokenSharing() throws Exception {
+        onEdt(() -> {
+            try (Fixture fixture = new Fixture()) {
+                ConfigPanel panel = fixture.panel;
+                button(panel, "Follower (send traffic)").doClick();
+                JTabbedPane tabs = find(panel, JTabbedPane.class).get(0);
+                tabs.setSelectedIndex(tabs.indexOfTab("VPN routing"));
+                field(panel, "Target domains").setText("*");
+                Container routing = (Container) tabs.getSelectedComponent();
+                field(routing, "Leader address").setText("127.0.0.1");
+                field(routing, "Relay password").setText("relay-secret");
+                field(routing, "Local SOCKS port").setText(Integer.toString(freeLoopbackPort()));
+                assertFalse(button(panel, "Allow direct connections to unlisted IP addresses").isSelected());
+                button(panel, "Start local routing").doClick();
+                assertTrue(fixture.proxy.isRunning());
+                assertFalse(fixture.poller.isConnected());
+                assertFalse(fixture.capture.isActive());
+                tabs.setSelectedIndex(tabs.indexOfTab("Session sharing"));
+                Container sharing = (Container) tabs.getSelectedComponent();
+                field(sharing, "Leader address").setText("127.0.0.1");
+                field(sharing, "Token password").setText("token-secret");
+                button(panel, "Connect to leader").doClick();
+                assertFalse(fixture.poller.isConnected());
+                assertTrue(fixture.proxy.isRunning());
+                button(panel, "Stop local routing").doClick();
+                assertFalse(fixture.proxy.isRunning());
+            }
+        });
+    }
+
+    private static int freeLoopbackPort() throws Exception {
+        try (ServerSocket socket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
+            return socket.getLocalPort();
+        }
+    }
+
+    private static JTextField field(Container root, String accessibleName) {
+        return find(root, JTextField.class).stream()
+                .filter(field -> accessibleName.equals(field.getAccessibleContext().getAccessibleName()))
+                .filter(ConfigPanelTest::visibleInRole)
+                .findFirst().orElseThrow(() -> new AssertionError("Missing field " + accessibleName));
+    }
+
+    private static boolean visibleInRole(Component component) {
+        for (Component current = component; current != null; current = current.getParent()) {
+            if (!current.isVisible()) return false;
+        }
+        return true;
     }
 
     @Test void rendersHeadlessUiPreviewsAtDesktopAndCompactSizes() throws Exception {
@@ -75,27 +210,34 @@ class ConfigPanelTest {
                     ConfigPanel panel = fixture.panel;
                     find(panel, JTextField.class).stream().filter(field -> "targetDomains".equals(field.getName()))
                             .findFirst().orElseThrow().setText("example.test, *.internal.test");
+                    JTabbedPane tabs = find(panel, JTabbedPane.class).get(0);
+                    button(panel, "Leader (receive traffic)").doClick();
+                    render(panel, size, output, "leader-burp-to-burp");
+                    tabs.setSelectedIndex(tabs.indexOfTab("VPN routing"));
+                    render(panel, size, output, "leader-routing");
+                    tabs.setSelectedIndex(tabs.indexOfTab("Session sharing"));
                     render(panel, size, output, "leader-sharing");
                     button(panel, "Additional token headers").doClick();
                     render(panel, size, output, "leader-sharing-headers");
                     renderAtBottom(panel, size, output, "leader-sharing-headers-bottom");
                     button(panel, "Additional token headers").doClick();
-                    JTabbedPane tabs = find(panel, JTabbedPane.class).get(0);
-                    tabs.setSelectedIndex(1);
-                    render(panel, size, output, "leader-routing");
-                    button(panel, "Follower: use a shared session").doClick();
-                    tabs.setSelectedIndex(0);
+                    button(panel, "Follower (send traffic)").doClick();
                     render(panel, size, output, "follower-sharing");
-                    tabs.setSelectedIndex(1);
+                    tabs.setSelectedIndex(tabs.indexOfTab("Burp to Burp"));
+                    field(panel, "Destination pattern").setText("api.example.test");
+                    field(panel, "Receiving Burp host").setText("work-laptop.example.test");
+                    render(panel, size, output, "follower-burp-to-burp");
+                    tabs.setSelectedIndex(tabs.indexOfTab("VPN routing"));
                     render(panel, size, output, "follower-routing");
                     renderAtBottom(panel, size, output, "follower-routing-bottom");
-                    tabs.setSelectedIndex(2);
+                    tabs.setSelectedIndex(tabs.indexOfTab("Session manager"));
                     render(panel, size, output, "session-manager");
                     renderAtBottom(panel, size, output, "session-manager-bottom");
+                    fixture.store.setTarget("example.test");
                     fixture.store.fromJson(sampleTokens().toJson());
                     button(panel, "Show token values").doClick();
                     button(panel, "Show token values").doClick();
-                    tabs.setSelectedIndex(3);
+                    tabs.setSelectedIndex(tabs.indexOfTab("Tokens & status"));
                     render(panel, size, output, "tokens-masked");
                     assertFalse(fixture.tokenServer.isRunning());
                     assertFalse(fixture.relay.isRunning());
@@ -160,19 +302,9 @@ class ConfigPanelTest {
         store.setTarget("example.test");
         store.setCsrfHeaderName("X-CSRF-Token");
         store.setWatchedHeaders(List.of("X-Device"));
-        store.applyCapturedResponse(Map.of("session", "cookie-preview-value"), "jwt-preview-value", "csrf-preview-value",
+        store.applyCapturedResponseForUrl("https://example.test/", List.of("session=cookie-preview-value"), "jwt-preview-value", "csrf-preview-value",
                 Map.of("X-Device", "header-preview-value"));
         return store;
-    }
-
-    private static MontoyaApi apiStub() {
-        Logging logging = (Logging) Proxy.newProxyInstance(Logging.class.getClassLoader(), new Class<?>[]{Logging.class},
-                (proxy, method, args) -> null);
-        return (MontoyaApi) Proxy.newProxyInstance(MontoyaApi.class.getClassLoader(), new Class<?>[]{MontoyaApi.class},
-                (proxy, method, args) -> {
-                    if (method.getName().equals("logging")) return logging;
-                    throw new AssertionError("UI preview must not call " + method.getName());
-                });
     }
 
     private static void onEdt(CheckedTask task) throws Exception {
@@ -197,18 +329,23 @@ class ConfigPanelTest {
 
     private static final class Fixture implements AutoCloseable {
         final TokenStore store = new TokenStore();
-        final MontoyaApi api = apiStub();
+        final MontoyaApi api = UpstreamProxyRulesTest.emptyProjectApi();
         final TokenServer tokenServer = new TokenServer(api, store);
         final SocksRelayServer relay = new SocksRelayServer(api);
         final TokenPoller poller = new TokenPoller(api, store);
         final SelectiveSocksProxy proxy = new SelectiveSocksProxy(api);
         final SessionManager session = new SessionManager(api, store);
+        final TokenCaptureHandler capture = new TokenCaptureHandler(api, store);
         final ConfigPanel panel = new ConfigPanel(api, store, tokenServer, relay,
-                new TokenCaptureHandler(api, store), poller, new TokenInjector(api, store, poller), proxy, session);
+                capture, poller, new TokenInjector(api, store, poller), proxy, session);
 
         @Override public void close() {
             assertTrue(SwingUtilities.isEventDispatchThread());
             panel.stopUiRefresh();
+            proxy.stop();
+            poller.stop();
+            relay.stop();
+            tokenServer.stop();
         }
     }
 }

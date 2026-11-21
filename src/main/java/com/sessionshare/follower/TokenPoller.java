@@ -196,6 +196,7 @@ public class TokenPoller {
 
     private synchronized void recordFailure(long runGeneration, String message) {
         if (!connected || generation != runGeneration) return;
+        tokenStore.clear();
         lastError = message == null ? "Unable to fetch tokens" : message;
         consecutiveFailures++;
         api.logging().logToError("[Follower] Poll failed: " + lastError);

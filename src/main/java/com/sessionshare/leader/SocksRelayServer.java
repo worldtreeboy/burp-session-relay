@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetAddress;
+import java.net.Inet6Address;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -88,14 +89,14 @@ public class SocksRelayServer {
     }
 
     /**
-     * Start the SOCKS5 relay on the given port. Binds to 0.0.0.0 so followers on the LAN can connect.
+     * Start on loopback for local clients and encrypted port forwarding.
      */
     public synchronized void start(int port) throws IOException {
-        start(port, null);
+        start(port, InetAddress.getByName("127.0.0.1"));
     }
 
-    // Allows loopback-only integration checks without exposing a test listener to the LAN.
-    synchronized void start(int port, InetAddress bindAddress) throws IOException {
+    /** A null bind address explicitly enables connections on all interfaces. */
+    public synchronized void start(int port, InetAddress bindAddress) throws IOException {
         if (running) {
             api.logging().logToOutput("[SOCKS] Already running.");
             return;
@@ -322,7 +323,7 @@ public class SocksRelayServer {
             }
             case ATYP_IPV6: {
                 byte[] addr = readFully(in, 16);
-                host = InetAddress.getByAddress(addr).getHostAddress();
+                host = Inet6Address.getByAddress(null, addr, -1).getHostAddress();
                 break;
             }
             default:

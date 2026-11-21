@@ -41,6 +41,13 @@ class UiValidationTest {
         }
     }
 
+    @Test void allDestinationsAreOnlyValidForRouting() {
+        assertEquals("*", UiValidation.scope("*"));
+        assertThrows(IllegalArgumentException.class, () -> UiValidation.credentialScope("*"));
+        assertThrows(IllegalArgumentException.class, () -> UiValidation.credentialScope("example.test, *"));
+        assertEquals("*.example.test", UiValidation.credentialScope("*.example.test"));
+    }
+
     @Test void acceptsOnlyCompleteHttpLoginUrlsWithValidPorts() {
         for (String value : List.of("https://example.test/login", "http://127.0.0.1:8080/login?mode=renew",
                 "https://[::1]/login")) {
@@ -51,6 +58,13 @@ class UiValidationTest {
                 "https://example.test:0/login", "https://example.test:65536/login")) {
             assertThrows(IllegalArgumentException.class, () -> UiValidation.loginUrl(value), value);
         }
+    }
+
+    @Test void handlesCookiesOutsideCustomResponseHeaders() {
+        assertEquals("X-Token", UiValidation.tokenHeaderName("X-Token"));
+        assertThrows(IllegalArgumentException.class, () -> UiValidation.tokenHeaderName("cookie"));
+        assertThrows(IllegalArgumentException.class, () -> UiValidation.tokenHeaderName("SET-COOKIE"));
+        assertEquals("Cookie", UiValidation.headerName("Cookie"));
     }
 
     @Test void acceptsHeaderNamesButRejectsHeaderLinesAndControlCharacters() {

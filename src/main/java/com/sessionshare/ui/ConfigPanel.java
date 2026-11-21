@@ -14,6 +14,8 @@ import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.text.DefaultCaret;
 import java.awt.*;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -35,13 +37,23 @@ public class ConfigPanel extends JPanel {
     private final SessionManager sessionManager;
 
     private final JTextField targetField = new JTextField(32);
-    private final JRadioButton leaderRadio = new JRadioButton("Leader: share my session", true);
-    private final JRadioButton followerRadio = new JRadioButton("Follower: use a shared session");
+    private final JRadioButton leaderRadio = new JRadioButton("Leader (receive traffic)");
+    private final JRadioButton followerRadio = new JRadioButton("Follower (send traffic)", true);
+    private final JComboBox<String> peerPattern = new JComboBox<>(new String[]{"*"});
+    private final JTextField peerHost = new JTextField(24);
+    private final JTextField peerPort = new JTextField("8080", 8);
+    private final JButton removePeerRule = new JButton("Remove forwarding");
+    private final JTextArea peerStatus = paragraph("");
+    private final Form serviceScope = new Form();
+    private final JPanel peerCards = roleCards();
     private final JPanel sharingCards = roleCards();
     private final JPanel routingCards = roleCards();
     private final JTabbedPane tabs = new JTabbedPane();
     private final JLabel overview = new JLabel("Sharing: off   |   VPN routing: off   |   Session manager: off");
     private final JLabel scopeHint = new JLabel("Stop active services before changing the role or target domains.");
+
+    private final JCheckBox allowRemote = new JCheckBox("Allow connections from other devices");
+    private final JCheckBox allowDirectIps = new JCheckBox("Allow direct connections to unlisted IP addresses");
 
     private final JTextField leaderPortField = new JTextField("8888", 8);
     private final JPasswordField leaderPasswordField = new JPasswordField(20);
@@ -49,21 +61,24 @@ public class ConfigPanel extends JPanel {
     private final DefaultTableModel headerModel = new DefaultTableModel(new String[]{"Response header name"}, 0);
     private final JTable headerTable = new JTable(headerModel);
     private final JButton leaderStartButton = new JButton("Start sharing");
-    private final JLabel leaderStatus = new JLabel("Sharing is off.");
-    private final JCheckBox socksEnabled = new JCheckBox("Enable VPN relay when sharing starts");
+    private final JTextArea leaderStatus = paragraph("Sharing is off.");
+    private final JPasswordField relayPasswordField = new JPasswordField(20);
+    private final JButton relayButton = new JButton("Start relay");
     private final JTextField socksPortField = new JTextField("1080", 8);
-    private final JLabel socksStatus = new JLabel("VPN relay is off.");
+    private final JTextArea socksStatus = paragraph("VPN relay is off.");
 
     private final JTextField followerHostField = new JTextField(24);
     private final JTextField followerPortField = new JTextField("8888", 8);
     private final JPasswordField followerPasswordField = new JPasswordField(20);
     private final JTextField pollIntervalField = new JTextField("5", 8);
     private final JButton followerConnectButton = new JButton("Connect to leader");
-    private final JLabel followerStatus = new JLabel("Not connected.");
+    private final JTextArea followerStatus = paragraph("Not connected.");
+    private final JTextField routingHostField = new JTextField(24);
+    private final JPasswordField routingPasswordField = new JPasswordField(20);
     private final JTextField followerSocksPortField = new JTextField("1080", 8);
     private final JTextField localSocksPortField = new JTextField("1081", 8);
     private final JButton routingButton = new JButton("Start local routing");
-    private final JLabel routingStatus = new JLabel("Local routing is off.");
+    private final JTextArea routingStatus = paragraph("Local routing is off.");
 
     private final JCheckBox smEnabled = new JCheckBox("Enable automatic session refresh");
     private final JTextField loginUrlField = new JTextField(32);
@@ -74,7 +89,7 @@ public class ConfigPanel extends JPanel {
     private final JTextField bufferField = new JTextField("30", 8);
     private final JButton testLoginButton = new JButton("Test login request");
     private final JButton refreshButton = new JButton("Refresh now");
-    private final JLabel sessionStatus = new JLabel("Automatic refresh is off.");
+    private final JTextArea sessionStatus = paragraph("Automatic refresh is off.");
     private final JLabel expiryStatus = new JLabel("JWT: no token stored");
 
     private final JCheckBox revealTokens = new JCheckBox("Show token values");
@@ -103,12 +118,15 @@ public class ConfigPanel extends JPanel {
         setLayout(new BorderLayout(0, 14));
         setBorder(BorderFactory.createEmptyBorder(16, 18, 14, 18));
         add(createHeader(), BorderLayout.NORTH);
+        peerCards.add(createBurpToBurp(true), "leader");
+        peerCards.add(createBurpToBurp(false), "follower");
         sharingCards.add(createLeaderSharing(), "leader");
         sharingCards.add(createFollowerSharing(), "follower");
         routingCards.add(createLeaderRouting(), "leader");
         routingCards.add(createFollowerRouting(), "follower");
-        tabs.addTab("Session sharing", scroll(sharingCards));
+        tabs.addTab("Burp to Burp", scroll(peerCards));
         tabs.addTab("VPN routing", scroll(routingCards));
+        tabs.addTab("Session sharing", scroll(sharingCards));
         tabs.addTab("Session manager", createSessionManager());
         tabs.addTab("Tokens & status", createTokenPanel());
         add(tabs, BorderLayout.CENTER);
@@ -117,6 +135,7 @@ public class ConfigPanel extends JPanel {
                 BorderFactory.createEmptyBorder(10, 0, 0, 0)));
         add(overview, BorderLayout.SOUTH);
         wireActions();
+        displayRole();
         updateControls();
         refreshUi();
         uiTimer = new Timer(2000, e -> refreshUi());
@@ -125,36 +144,106 @@ public class ConfigPanel extends JPanel {
 
     private JPanel createHeader() {
         JPanel header = new JPanel(new BorderLayout(0, 12));
-        JPanel introduction = new JPanel(new GridLayout(0, 1, 0, 4));
-        JLabel title = new JLabel("Burp Session Relay  1.1");
+        JLabel title = new JLabel("Burp Session Relay");
         title.setFont(title.getFont().deriveFont(Font.BOLD, 22f));
-        introduction.add(title);
-        JLabel subtitle = new JLabel("Share an application session and optional network access with your team.");
-        subtitle.setFont(subtitle.getFont().deriveFont(Font.PLAIN));
-        introduction.add(subtitle);
-        header.add(introduction, BorderLayout.NORTH);
+        header.add(title, BorderLayout.NORTH);
         Form common = new Form();
-        common.field("Target domains", targetField, "Example: example.com, *.internal.test. Tokens apply to every listed domain; use domains for the same login session.");
         targetField.setName("targetDomains");
         ButtonGroup roles = new ButtonGroup();
         roles.add(leaderRadio);
         roles.add(followerRadio);
         JPanel rolePanel = new JPanel(new GridLayout(1, 2, 14, 0));
-        rolePanel.add(leaderRadio);
         rolePanel.add(followerRadio);
-        common.field("This Burp instance", rolePanel, null);
-        common.wide(scopeHint);
+        rolePanel.add(leaderRadio);
+        common.field("This computer", rolePanel, null);
+        serviceScope.field("Target domains", targetField, "Enter domains separated by commas, e.g. app.example.test, api.example.test. Each includes its subdomains.");
+        serviceScope.wide(scopeHint);
+        allowRemote.setToolTipText("Permit direct connections to leader services on all network interfaces.");
+        serviceScope.wide(allowRemote);
+        serviceScope.setVisible(false);
+        common.wide(serviceScope);
         header.add(common, BorderLayout.CENTER);
         return header;
     }
 
+    private JPanel createBurpToBurp(boolean leader) {
+        Form setup = new Form();
+        String title = leader ? "Receive requests in this Burp" : "Send requests to the other Burp";
+        String route = "Client  →  follower Burp  →  leader Burp  →  destination";
+        JButton settings = new JButton("Open Burp settings");
+        settings.addActionListener(e -> api.userInterface().openSettingsWindow());
+        if (leader) {
+            setup.wide(actions(settings));
+            setup.wide(step("Set up the listener",
+                    "In Tools → Proxy → Proxy listeners, add or select a running listener. Use a loopback listener such as 127.0.0.1:8080 with SSH port forwarding, or bind to a trusted interface reachable over a protected link."));
+            setup.wide(step("Give the follower your listener address",
+                    "Share the HTTP listener’s hostname and port. If using SSH, share the follower’s local forwarded address and port. Keep this connection separate from the follower’s own Burp listener."));
+        } else {
+            peerPattern.setEditable(true);
+            peerPattern.setSelectedItem("");
+            peerPattern.getEditor().getEditorComponent().getAccessibleContext().setAccessibleName("Destination pattern");
+            setup.field("Destination pattern", peerPattern, "Enter a hostname or *.example.test for subdomains. Select * to forward all destinations.");
+            setup.field("Receiving Burp host", peerHost, "Use the other Burp’s reachable address, or a local SSH forward on a separate port from your own Burp listener.");
+            setup.field("HTTP listener port", peerPort, null);
+            JButton apply = new JButton("Apply to this project");
+            JButton refresh = new JButton("Refresh status");
+            apply.addActionListener(e -> {
+                try {
+                    UpstreamProxyRules.apply(api, peerPattern.getEditor().getItem().toString().trim(), UiValidation.host(peerHost.getText()),
+                            port(peerPort, "HTTP listener port"));
+                    refreshPeerState();
+                } catch (Exception ex) {
+                    showError(peerStatus, "Could not apply forwarding", ex);
+                }
+            });
+            removePeerRule.addActionListener(e -> {
+                try {
+                    UpstreamProxyRules.remove(api);
+                    refreshPeerState();
+                } catch (Exception ex) {
+                    showError(peerStatus, "Could not remove forwarding", ex);
+                }
+            });
+            refresh.addActionListener(e -> refreshPeerState());
+            setup.wide(actions(apply, removePeerRule, refresh));
+            setup.wide(peerStatus);
+        }
+        setup.wide(step("Check both HTTP histories",
+                "Send a request through the follower’s Proxy listener. Look for the same path under Proxy → HTTP history on both machines. Forward any paused request if Intercept is on."));
+        Form help = new Form();
+        if (!leader) {
+            help.wide(actions(settings));
+            help.wide(paragraph("To configure manually, open Network → Connections → Upstream proxy servers. Put the destination rule above broader matches. Disable any SOCKS setting left over from VPN routing."));
+        }
+        help.wide(paragraph("To inspect HTTPS on both machines with upstream TLS verification enabled, add the receiving Burp’s public CA under Network → TLS → Custom CA certificates on the follower. TLS pass through on the receiver hides its HTTP details."));
+        JToggleButton details = new JToggleButton(leader ? "HTTPS settings" : "Manual setup and HTTPS");
+        help.setVisible(false);
+        details.addActionListener(e -> {
+            help.setVisible(details.isSelected());
+            revalidate();
+        });
+        setup.wide(actions(details));
+        setup.wide(help);
+        return page(title, route, setup);
+    }
+
+    private static JPanel step(String title, String instruction) {
+        JPanel step = new JPanel(new BorderLayout(0, 3));
+        JLabel heading = new JLabel(title);
+        heading.setFont(heading.getFont().deriveFont(Font.BOLD));
+        step.add(heading, BorderLayout.NORTH);
+        step.add(paragraph(instruction), BorderLayout.CENTER);
+        return step;
+    }
+
     private JPanel createLeaderSharing() {
         Form form = new Form();
-        form.field("Token-sharing port", leaderPortField, "Followers use this port to fetch session tokens. Default: 8888.");
-        form.field("Shared password", leaderPasswordField, "Enter the same password on the follower. Token sharing uses plain HTTP on the local network.");
+        form.field("Token-sharing port", leaderPortField, null);
+        form.field("Token password", leaderPasswordField, "Give this password only to teammates who should receive credentials. Use a separate password for routing.");
         leaderSettings.addAll(List.of(leaderPortField, leaderPasswordField, leaderCsrfHeaderField, headerTable));
         form.wide(actions(leaderStartButton));
         form.wide(leaderStatus);
+        form.wide(paragraph("By default, forward this port through SSH to reach it from another computer. For direct connections over an encrypted network, select Allow connections from other devices."));
 
         Form extra = new Form();
         extra.field("CSRF header", leaderCsrfHeaderField, "Header used for the CSRF token. Leave empty to disable this header.");
@@ -192,49 +281,48 @@ public class ConfigPanel extends JPanel {
         });
         form.wide(actions(advanced));
         form.wide(extra);
-        return page("Share this session", "Start sharing, then log in through this Burp instance. Captured tokens are available to followers and appear under Tokens & status.", form);
+        return page("Share this session", "Share tokens for one application session. Use a trusted encrypted link between teammates for the password and tokens sent over HTTP.", form);
     }
 
     private JPanel createFollowerSharing() {
         Form form = new Form();
         form.field("Leader address", followerHostField, "The leader's reachable hostname or IP address, without http:// or a port.");
         form.field("Token-sharing port", followerPortField, "Must match the leader's token-sharing port. Default: 8888.");
-        form.field("Shared password", followerPasswordField, "Use the password configured by the leader.");
+        form.field("Token password", followerPasswordField, "Use the password from the leader’s Session sharing tab.");
         form.field("Check for tokens every", pollIntervalField, "Seconds between token updates. Default: 5.");
         followerSettings.addAll(List.of(followerHostField, followerPortField, followerPasswordField, pollIntervalField));
         form.wide(actions(followerConnectButton));
         form.wide(followerStatus);
-        form.wide(paragraph("To reach a website through the leader's VPN, also configure the VPN routing tab. A token connection alone does not route website traffic."));
-        return page("Use the leader's session", "Enter the leader's connection details. The latest tokens will be applied to requests for the target domains shown above.", form);
+        return page("Use the leader's session", "Use the same target domains as the leader. Connect over a trusted encrypted link to receive session credentials.", form);
     }
 
     private JPanel createLeaderRouting() {
         Form form = new Form();
-        form.wide(socksEnabled);
-        form.field("VPN relay port", socksPortField, "A separate SOCKS5 port for website traffic. Default: 1080. Must differ from the token-sharing port.");
+        form.field("Relay port", socksPortField, null);
+        form.field("Relay password", relayPasswordField, "SOCKS sends this password in plain text. Use an encrypted link between teammates.");
+        form.wide(actions(relayButton));
         form.wide(socksStatus);
-        form.wide(paragraph("The relay starts and stops with Start sharing / Stop sharing. Stop sharing before changing these settings."));
-        form.wide(paragraph("The leader opens the destination connection using its operating system's network routes and DNS. The VPN must already be connected and able to reach the target website from this machine."));
-        form.wide(paragraph("Followers need this relay port and the shared password. Only the configured target domains are allowed through the relay."));
-        return page("Share the leader's network access", "Enable the relay if the target website is only reachable through this machine's VPN. The extension uses an existing VPN connection.", form);
+        form.wide(paragraph("For another computer, forward this port over SSH. To connect directly over a trusted encrypted network, select Allow connections from other devices and give followers this computer’s address."));
+        return page("Start a SOCKS relay", "Connect this computer to the target network or VPN first. Starting the relay gives followers a route to the target domains.", form);
     }
 
     private JPanel createFollowerRouting() {
         Form form = new Form();
-        form.wide(paragraph("Uses the leader address and shared password from Session sharing, plus the target domains above."));
-        form.field("Leader VPN relay port", followerSocksPortField, "Must match the leader's VPN relay port, usually 1080. This is different from the token-sharing port.");
-        form.field("Local SOCKS port", localSocksPortField, "A free port on this computer. The local listener uses 127.0.0.1. Default: 1081.");
+        form.field("Leader address", routingHostField, "Hostname or IP address of the relay, or your SSH-forwarded endpoint.");
+        form.field("Leader relay port", followerSocksPortField, null);
+        form.field("Relay password", routingPasswordField, null);
+        form.field("Local SOCKS port", localSocksPortField, "Burp connects here on this computer.");
+        allowDirectIps.setToolTipText("An IP may belong to a target domain that Burp resolved locally.");
+        form.wide(allowDirectIps);
         form.wide(actions(routingButton));
         form.wide(routingStatus);
-        JPanel instructions = new JPanel(new GridLayout(0, 1, 0, 8));
-        instructions.setBorder(BorderFactory.createTitledBorder("Burp network settings"));
-        instructions.add(paragraph("After starting local routing, set Burp's SOCKS5 proxy host to 127.0.0.1 and its port to the Local SOCKS port above."));
-        instructions.add(paragraph("Leave SOCKS authentication empty on this local connection and enable hostname / DNS resolution through SOCKS."));
-        instructions.add(paragraph("Matching target domains go through the leader. Other destinations connect directly from this computer. Starting local routing does not change Burp's network settings."));
-        instructions.add(paragraph("When stopping local routing, disable or change Burp's SOCKS setting so traffic is not sent to a stopped listener."));
+        Form instructions = new Form();
+        instructions.setBorder(BorderFactory.createTitledBorder("Connect Burp to the local listener"));
+        instructions.wide(paragraph("1. In Burp’s network settings, enable SOCKS. Use 127.0.0.1 and the local SOCKS port above. Leave the local username and password blank."));
+        instructions.wide(paragraph("2. Enable DNS lookups through SOCKS so the relay can match hostnames. Open a target site through Burp to check the route."));
+        instructions.wide(paragraph("3. Disable Burp’s SOCKS setting when you stop local routing."));
         form.wide(instructions);
-        form.wide(paragraph("For phone traffic, the phone must use this follower's Burp HTTP/HTTPS proxy. Interception remains on the follower."));
-        return page("Route target traffic through the leader", "Follower Burp  →  local SOCKS  →  leader's VPN relay  →  target website", form);
+        return page("Route traffic through a leader", "Target domains use the leader’s network. Other hostnames connect directly. Unlisted IP addresses are blocked by default.", form);
     }
 
     private JPanel createSessionManager() {
@@ -275,11 +363,20 @@ public class ConfigPanel extends JPanel {
     }
 
     private void wireActions() {
-        leaderRadio.addActionListener(e -> switchRole());
-        followerRadio.addActionListener(e -> switchRole());
+        tabs.addChangeListener(e -> {
+            serviceScope.setVisible(tabs.getSelectedIndex() != 0);
+            refreshUi();
+            if (tabs.getSelectedIndex() == 0 && followerRadio.isSelected()) refreshPeerState();
+        });
+        leaderRadio.addItemListener(e -> {
+            if (e.getStateChange() == java.awt.event.ItemEvent.SELECTED) switchRole();
+        });
+        followerRadio.addItemListener(e -> {
+            if (e.getStateChange() == java.awt.event.ItemEvent.SELECTED) switchRole();
+        });
         leaderStartButton.addActionListener(e -> toggleLeader());
         followerConnectButton.addActionListener(e -> toggleFollower());
-        socksEnabled.addActionListener(e -> updateControls());
+        relayButton.addActionListener(e -> toggleRelay());
         routingButton.addActionListener(e -> toggleRouting());
         smEnabled.addActionListener(e -> toggleSessionManager());
         testLoginButton.addActionListener(e -> testLogin());
@@ -287,52 +384,55 @@ public class ConfigPanel extends JPanel {
         revealTokens.addActionListener(e -> refreshUi());
     }
 
-    private void switchRole() {
+    private void displayRole() {
         String role = leaderRadio.isSelected() ? "leader" : "follower";
+        ((CardLayout) peerCards.getLayout()).show(peerCards, role);
         ((CardLayout) sharingCards.getLayout()).show(sharingCards, role);
         ((CardLayout) routingCards.getLayout()).show(routingCards, role);
+        if (tabs.getSelectedIndex() == 0 && followerRadio.isSelected()) refreshPeerState();
         revalidate();
+    }
+
+    private void switchRole() {
+        displayRole();
         tokenStore.clear();
         revealTokens.setSelected(false);
         updateControls();
         refreshUi();
     }
 
+    private void refreshPeerState() {
+        try {
+            String current = UpstreamProxyRules.current(api);
+            removePeerRule.setEnabled(!current.isEmpty());
+            peerStatus.setText(current.isEmpty() ? "No forwarding rule managed by this extension." : "Project rule   " + current);
+        } catch (Exception ex) {
+            removePeerRule.setEnabled(false);
+            peerStatus.setText("Forwarding status unavailable. Check Burp’s upstream proxy settings.");
+        }
+    }
+
     private void toggleLeader() {
         if (tokenServer.isRunning()) {
             captureHandler.setActive(false);
-            socksRelayServer.stop();
             tokenServer.stop();
             leaderStatus.setText("Sharing is off.");
-            socksStatus.setText("VPN relay is off.");
         } else {
             try {
-                String target = UiValidation.scope(targetField.getText());
+                String target = UiValidation.credentialScope(targetField.getText());
                 int port = port(leaderPortField, "Token-sharing port");
                 String password = password(leaderPasswordField);
                 String csrf = leaderCsrfHeaderField.getText().trim();
-                if (!csrf.isEmpty()) UiValidation.headerName(csrf);
+                if (!csrf.isEmpty()) UiValidation.tokenHeaderName(csrf);
                 List<String> headers = watchedHeaders();
-                int relayPort = socksEnabled.isSelected() ? port(socksPortField, "VPN relay port") : 0;
-                if (relayPort == port) throw new IllegalArgumentException("Token sharing and VPN relay need different ports.");
-                if (relayPort != 0) validateSocksPassword(password);
+                if (socksRelayServer.isRunning()) {
+                    validateDistinctServices(true, port, password, socksPortField, relayPasswordField);
+                }
                 tokenStore.setTarget(target);
                 tokenStore.setCsrfHeaderName(csrf);
                 tokenStore.setWatchedHeaders(headers);
                 tokenServer.setPassword(password);
-                tokenServer.start(port);
-                try {
-                    if (relayPort != 0) {
-                        socksRelayServer.setPassword(password);
-                        socksRelayServer.setAllowedScope(target);
-                        socksRelayServer.start(relayPort);
-                    }
-                } catch (Exception ex) {
-                    // Do not leave half of the requested services active after a failed start.
-                    tokenServer.stop();
-                    socksRelayServer.stop();
-                    throw ex;
-                }
+                tokenServer.start(port, leaderBindAddress());
                 captureHandler.setActive(true);
             } catch (Exception ex) {
                 showError(leaderStatus, "Could not start sharing", ex);
@@ -340,6 +440,48 @@ public class ConfigPanel extends JPanel {
         }
         updateControls();
         refreshUi();
+    }
+
+    private void toggleRelay() {
+        if (socksRelayServer.isRunning()) {
+            socksRelayServer.stop();
+            socksStatus.setText("VPN relay is off.");
+        } else {
+            try {
+                String target = UiValidation.scope(targetField.getText());
+                int relayPort = port(socksPortField, "Relay port");
+                String password = password(relayPasswordField);
+                validateSocksPassword(password);
+                if (tokenServer.isRunning()) {
+                    validateDistinctServices(true, relayPort, password, leaderPortField, leaderPasswordField);
+                }
+                socksRelayServer.setAllowedScope(target);
+                socksRelayServer.setPassword(password);
+                socksRelayServer.start(relayPort, leaderBindAddress());
+            } catch (Exception ex) {
+                showError(socksStatus, "Could not start relay", ex);
+            }
+        }
+        updateControls();
+        refreshUi();
+    }
+
+    private InetAddress leaderBindAddress() throws UnknownHostException {
+        return allowRemote.isSelected() ? null : InetAddress.getByName("127.0.0.1");
+    }
+
+    private String leaderListenAddress(JTextField port) {
+        return allowRemote.isSelected() ? "all interfaces on port " + port.getText().trim() : "127.0.0.1:" + port.getText().trim();
+    }
+
+    private static void validateDistinctServices(boolean sameHost, int port, String password, JTextField activePort,
+                                                JPasswordField activePassword) {
+        if (sameHost && port == Integer.parseInt(activePort.getText().trim())) {
+            throw new IllegalArgumentException("Use different ports for routing and token sharing.");
+        }
+        if (password.equals(new String(activePassword.getPassword()))) {
+            throw new IllegalArgumentException("Use different passwords for routing and token sharing.");
+        }
     }
 
     private void toggleFollower() {
@@ -353,7 +495,11 @@ public class ConfigPanel extends JPanel {
                 int port = port(followerPortField, "Token-sharing port");
                 String password = password(followerPasswordField);
                 int interval = UiValidation.number(pollIntervalField.getText(), "Token update interval", 1, 3600);
-                String target = UiValidation.scope(targetField.getText());
+                String target = UiValidation.credentialScope(targetField.getText());
+                if (selectiveSocksProxy.isRunning()) {
+                    validateDistinctServices(host.equalsIgnoreCase(routingHostField.getText().trim()),
+                            port, password, followerSocksPortField, routingPasswordField);
+                }
                 tokenStore.setTarget(target);
                 // A different leader may be serving the same domains. Do not reuse prior credentials.
                 tokenStore.clear();
@@ -377,15 +523,18 @@ public class ConfigPanel extends JPanel {
             routingStatus.setText("Local routing stopped. Disable or change Burp's SOCKS setting.");
         } else {
             try {
-                String host = UiValidation.host(followerHostField.getText());
-                String password = password(followerPasswordField);
+                String host = UiValidation.host(routingHostField.getText());
+                String password = password(routingPasswordField);
                 validateSocksPassword(password);
                 String target = UiValidation.scope(targetField.getText());
                 int remotePort = port(followerSocksPortField, "Leader VPN relay port");
                 int localPort = port(localSocksPortField, "Local SOCKS port");
-                tokenStore.setTarget(target);
-                selectiveSocksProxy.start(localPort, host, remotePort, password, target);
-                routingStatus.setText("Local listener: 127.0.0.1:" + localPort + ". Website connectivity has not been checked.");
+                if (tokenPoller.isConnected()) {
+                    validateDistinctServices(host.equalsIgnoreCase(followerHostField.getText().trim()),
+                            remotePort, password, followerPortField, followerPasswordField);
+                }
+                selectiveSocksProxy.start(localPort, host, remotePort, password, target, allowDirectIps.isSelected());
+                routingStatus.setText("Listening at 127.0.0.1:" + localPort + ". Configure Burp below, then open a target site.");
             } catch (Exception ex) {
                 showError(routingStatus, "Could not start local routing", ex);
             }
@@ -414,7 +563,7 @@ public class ConfigPanel extends JPanel {
 
     /** Read all Swing fields on the event thread before starting a background request. */
     private void applySessionConfig() {
-        String target = UiValidation.scope(targetField.getText());
+        String target = UiValidation.credentialScope(targetField.getText());
         String loginUrl = UiValidation.loginUrl(loginUrlField.getText());
         int buffer = UiValidation.number(bufferField.getText(), "Expiry buffer", 0, 86400);
         String contentType = contentTypeField.getText().trim();
@@ -489,15 +638,21 @@ public class ConfigPanel extends JPanel {
         boolean sharing = tokenServer.isRunning();
         boolean following = tokenPoller.isConnected();
         boolean routing = selectiveSocksProxy.isRunning();
+        boolean relay = socksRelayServer.isRunning();
         boolean session = sessionManager.isEnabled();
-        boolean locked = sharing || following || routing || session || sessionBusy;
+        boolean locked = sharing || following || routing || relay || session || sessionBusy;
         targetField.setEnabled(!locked);
         leaderRadio.setEnabled(!locked);
         followerRadio.setEnabled(!locked);
         for (JComponent c : leaderSettings) c.setEnabled(!sharing && !sessionBusy);
-        for (JComponent c : followerSettings) c.setEnabled(!following && !routing && !sessionBusy);
-        socksEnabled.setEnabled(!sharing && !sessionBusy);
-        socksPortField.setEnabled(!sharing && !sessionBusy && socksEnabled.isSelected());
+        for (JComponent c : followerSettings) c.setEnabled(!following && !sessionBusy);
+        allowRemote.setVisible(leaderRadio.isSelected());
+        allowRemote.setEnabled(!sharing && !relay && !sessionBusy);
+        allowDirectIps.setEnabled(!routing && !sessionBusy);
+        socksPortField.setEnabled(!relay && !sessionBusy);
+        relayPasswordField.setEnabled(!relay && !sessionBusy);
+        routingHostField.setEnabled(!routing && !sessionBusy);
+        routingPasswordField.setEnabled(!routing && !sessionBusy);
         followerSocksPortField.setEnabled(!routing && !sessionBusy);
         localSocksPortField.setEnabled(!routing && !sessionBusy);
         for (JComponent c : sessionSettings) c.setEnabled(!session && !sessionBusy);
@@ -507,12 +662,14 @@ public class ConfigPanel extends JPanel {
         leaderStartButton.setEnabled(!sessionBusy);
         followerConnectButton.setEnabled(!sessionBusy);
         routingButton.setEnabled(!sessionBusy);
+        relayButton.setEnabled(!sessionBusy);
+        relayButton.setText(relay ? "Stop relay" : "Start relay");
         leaderStartButton.setText(sharing ? "Stop sharing" : "Start sharing");
         followerConnectButton.setText(following ? "Disconnect" : "Connect to leader");
         routingButton.setText(routing ? "Stop local routing" : "Start local routing");
         testLoginButton.setText(sessionBusy && !smEnabled.isSelected() ? "Sending request..." : "Test login request");
-        scopeHint.setText(locked ? "Role and target domains are locked while a service or login request is active."
-                : "Changing target domains clears stored tokens. Separate tokens require separate Burp instances.");
+        scopeHint.setText(locked ? "Stop active services to edit the role or target domains."
+                : "Use * to route all destinations. Session sharing and refresh require named targets.");
     }
 
     private void refreshUi() {
@@ -520,7 +677,7 @@ public class ConfigPanel extends JPanel {
         String sharingState = "off";
         if (tokenServer.isRunning()) {
             sharingState = "leader";
-            leaderStatus.setText("Sharing on port " + leaderPortField.getText().trim()
+            leaderStatus.setText("Listening on " + leaderListenAddress(leaderPortField)
                     + " | Token requests served: " + tokenServer.getRequestCount());
         }
         if (tokenPoller.isConnected()) {
@@ -539,12 +696,14 @@ public class ConfigPanel extends JPanel {
             }
         }
         if (socksRelayServer.isRunning()) {
-            socksStatus.setText("VPN relay listening on port " + socksPortField.getText().trim()
+            socksStatus.setText("Listening on " + leaderListenAddress(socksPortField)
                     + " | Active connections: " + socksRelayServer.getActiveConnections());
         }
         String routingState = socksRelayServer.isRunning() ? "leader relay listening"
                 : selectiveSocksProxy.isRunning() ? "local listener running" : "off";
-        overview.setText("Sharing: " + sharingState + "   |   VPN routing: " + routingState
+        overview.setVisible(tabs.getSelectedIndex() != 0 || tokenServer.isRunning() || tokenPoller.isConnected()
+                || socksRelayServer.isRunning() || selectiveSocksProxy.isRunning() || sessionManager.isEnabled() || sessionBusy);
+        overview.setText("VPN routing: " + routingState + "   |   Session sharing: " + sharingState
                 + "   |   Session manager: " + (sessionBusy ? "request in progress" : sessionManager.isEnabled() ? "on" : "off"));
         expiryStatus.setText("JWT: " + sessionManager.getJwtExpiryInfo()
                 + " | Token refreshes: " + sessionManager.getRefreshCount());
@@ -586,7 +745,7 @@ public class ConfigPanel extends JPanel {
         List<String> headers = new ArrayList<>();
         for (int row = 0; row < headerModel.getRowCount(); row++) {
             Object value = headerModel.getValueAt(row, 0);
-            if (value != null && !value.toString().isBlank()) headers.add(UiValidation.headerName(value.toString()));
+            if (value != null && !value.toString().isBlank()) headers.add(UiValidation.tokenHeaderName(value.toString()));
         }
         return headers;
     }
@@ -597,7 +756,7 @@ public class ConfigPanel extends JPanel {
 
     private static String password(JPasswordField field) {
         String password = new String(field.getPassword());
-        if (password.isBlank()) throw new IllegalArgumentException("Enter a non-empty shared password.");
+        if (password.isBlank()) throw new IllegalArgumentException("Enter a password for this service.");
         if (password.indexOf('\r') >= 0 || password.indexOf('\n') >= 0) {
             throw new IllegalArgumentException("The shared password must fit on one line.");
         }
@@ -610,10 +769,9 @@ public class ConfigPanel extends JPanel {
         }
     }
 
-    private void showError(JLabel status, String action, Exception error) {
+    private void showError(JTextArea status, String action, Exception error) {
         String detail = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
         status.setText(action + ": " + detail);
-        status.setToolTipText(detail);
         api.logging().logToError("[Settings] " + action + ": " + detail);
     }
 

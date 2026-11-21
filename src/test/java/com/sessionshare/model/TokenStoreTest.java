@@ -58,7 +58,7 @@ class TokenStoreTest {
         TokenStore store = populatedStore();
 
         store.removeWatchedHeader("x-session");
-        store.applyCapturedResponse(Map.of(), null, null, Map.of("X-SESSION", "stale"));
+        store.applyCapturedResponseForUrl("https://first.example/", List.of(), null, null, Map.of("X-SESSION", "stale"));
 
         assertEquals(Map.of("X-Device", "device-one"), store.getSnapshot().customHeaders);
     }
@@ -66,7 +66,7 @@ class TokenStoreTest {
     @Test void capturesTreatHeaderNamesAsCaseInsensitive() {
         TokenStore store = populatedStore();
 
-        store.applyCapturedResponse(Map.of(), null, null, Map.of("x-device", "device-two"));
+        store.applyCapturedResponseForUrl("https://first.example/", List.of(), null, null, Map.of("x-device", "device-two"));
 
         assertEquals(2, store.getSnapshot().customHeaders.size());
         assertEquals("device-two", store.getSnapshot().customHeaders.get("x-device"));
@@ -78,7 +78,7 @@ class TokenStoreTest {
         String before = store.toJson();
 
         assertThrows(IllegalArgumentException.class, () -> store.fromJson("""
-                {"cookies":{"session":"new"},"jwt":"new-jwt",
+                {"version":"2","target":"first.example","cookies":[],"jwt":"new-jwt",
                  "csrfHeaderName":"X-CSRF-Token","csrfValue":"new-csrf",
                  "customHeaders":{"X-Device":null}}
                 """));
@@ -90,9 +90,9 @@ class TokenStoreTest {
         TokenStore store = populatedStore();
         String before = store.toJson();
         List<String> invalidPayloads = List.of(
-                "null", "[]", "{}",
-                "{\"cookies\":{},\"jwt\":42,\"csrfHeaderName\":\"\",\"csrfValue\":\"\"}",
-                "{\"cookies\":{\"session\":null},\"jwt\":\"\",\"csrfHeaderName\":\"\",\"csrfValue\":\"\"}");
+                "null", "[]", "{\"version\":\"2\",\"target\":\"first.example\"}",
+                "{\"version\":\"2\",\"target\":\"first.example\",\"cookies\":[],\"jwt\":42,\"csrfHeaderName\":\"\",\"csrfValue\":\"\"}",
+                "{\"version\":\"2\",\"target\":\"first.example\",\"cookies\":{\"session\":null},\"jwt\":\"\",\"csrfHeaderName\":\"\",\"csrfValue\":\"\"}");
 
         for (String payload : invalidPayloads) {
             assertThrows(IllegalArgumentException.class, () -> store.fromJson(payload));
@@ -105,7 +105,7 @@ class TokenStoreTest {
         String before = store.toJson();
 
         assertThrows(IllegalArgumentException.class, () -> store.fromJson("""
-                {"cookies":{},"jwt":"","csrfHeaderName":"","csrfValue":"",
+                {"version":"2","target":"first.example","cookies":[],"jwt":"","csrfHeaderName":"","csrfValue":"",
                  "customHeaders":{"X-Device":"line one\\nline two"}}
                 """));
 
@@ -148,7 +148,7 @@ class TokenStoreTest {
         String before = store.toJson();
 
         assertThrows(IllegalArgumentException.class, () -> store.fromJson("""
-                {"cookies":{},"jwt":"","csrfHeaderName":"","csrfValue":"orphan"}
+                {"version":"2","target":"first.example","cookies":[],"jwt":"","csrfHeaderName":"","csrfValue":"orphan"}
                 """));
         assertEquals(before, store.toJson());
     }
@@ -156,11 +156,11 @@ class TokenStoreTest {
     @Test void fullPayloadRoundTripsWithoutChangingTheFollowersLocalScope() {
         TokenStore leader = populatedStore();
         TokenStore follower = new TokenStore();
-        follower.setTarget("local.example");
+        follower.setTarget("First.Example.");
 
         follower.fromJson(leader.toJson());
 
-        assertEquals("local.example", follower.getTarget());
+        assertEquals("First.Example.", follower.getTarget());
         assertEquals(leader.getSnapshot().cookieString, follower.getSnapshot().cookieString);
         assertEquals(leader.getSnapshot().jwt, follower.getSnapshot().jwt);
         assertEquals(leader.getSnapshot().csrfHeaderName, follower.getSnapshot().csrfHeaderName);
@@ -168,12 +168,12 @@ class TokenStoreTest {
         assertEquals(leader.getSnapshot().customHeaders, follower.getSnapshot().customHeaders);
     }
 
-    @Test void olderPayloadWithoutCustomHeadersReplacesAllPriorCredentials() {
+    @Test void legacySnapshotsAreRejectedAndStaleTokensAreCleared() {
         TokenStore store = populatedStore();
 
-        store.fromJson("""
-                {"cookies":{},"jwt":"","csrfHeaderName":"","csrfValue":""}
-                """);
+        assertThrows(IllegalArgumentException.class, () -> store.fromJson("""
+                {"target":"first.example","cookies":{},"jwt":"","csrfHeaderName":"","csrfValue":""}
+                """));
 
         assertEquals("", store.getCookieString());
         assertEquals("", store.getJwt());
@@ -205,7 +205,7 @@ class TokenStoreTest {
         assertNull(store.getSnapshotForUrl(null));
 
         store.setTarget("second.example");
-        store.applyCapturedResponseForUrl("https://second.example/login", Map.of("session", "cookie-two"),
+        store.applyCapturedResponseForUrl("https://second.example/login", List.of("session=cookie-two"),
                 "jwt-two", "csrf-two", Map.of("X-Device", "device-two"));
 
         assertNull(store.getSnapshotForUrl("https://first.example/account"));
@@ -226,7 +226,7 @@ class TokenStoreTest {
         String before = store.toJson();
 
         boolean accepted = store.applyCapturedResponseForUrl(originalResponseUrl,
-                Map.of("session", "stale-cookie"), "stale-jwt", "stale-csrf",
+                List.of("session=stale-cookie"), "stale-jwt", "stale-csrf",
                 Map.of("X-Device", "stale-device"));
 
         assertFalse(accepted);
@@ -237,9 +237,9 @@ class TokenStoreTest {
         TokenStore store = populatedStore();
 
         assertTrue(store.applyCapturedResponseForUrl("https://api.first.example/login",
-                Map.of("session", "cookie-two"), "jwt-two", "csrf-two",
+                List.of("session=cookie-two"), "jwt-two", "csrf-two",
                 Map.of("X-Device", "device-two")));
-        TokenStore.Snapshot snapshot = store.getSnapshotForUrl("https://first.example/account");
+        TokenStore.Snapshot snapshot = store.getSnapshotForUrl("https://api.first.example/account");
         assertNotNull(snapshot);
         assertEquals("session=cookie-two", snapshot.cookieString);
         assertEquals("jwt-two", snapshot.jwt);
@@ -248,7 +248,7 @@ class TokenStoreTest {
         String before = store.toJson();
 
         for (String source : new String[]{null, "invalid URL", "https://second.example/login"}) {
-            assertFalse(store.applyCapturedResponseForUrl(source, Map.of("session", "unrelated"),
+            assertFalse(store.applyCapturedResponseForUrl(source, List.of("session=unrelated"),
                     "unrelated", "unrelated", Map.of("X-Device", "unrelated")));
             assertEquals(before, store.toJson());
         }
@@ -260,17 +260,17 @@ class TokenStoreTest {
         store.setTarget("second.example");
         String before = store.toJson();
 
-        assertFalse(store.applyLoginResponseForTarget(originalTarget, Map.of("session", "stale"),
+        assertFalse(store.applyLoginResponseForTarget(originalTarget, "https://idp.example/login", List.of("session=stale"),
                 "stale", "stale", Map.of("X-Device", "stale")));
         assertEquals(before, store.toJson());
 
-        assertTrue(store.applyLoginResponseForTarget(store.getTarget(), Map.of("session", "current"),
+        assertTrue(store.applyLoginResponseForTarget(store.getTarget(), "https://idp.example/login", List.of("session=current"),
                 "current", "current", Map.of("X-Device", "current")));
         assertEquals("current", store.getJwt());
 
         store.setTarget("");
         before = store.toJson();
-        assertFalse(store.applyLoginResponseForTarget("", Map.of(), "unconfigured", null, Map.of()));
+        assertFalse(store.applyLoginResponseForTarget("", "https://idp.example/login", List.of(), "unconfigured", null, Map.of()));
         assertEquals(before, store.toJson());
     }
 
@@ -289,12 +289,81 @@ class TokenStoreTest {
         assertThrows(UnsupportedOperationException.class, () -> watched.clear());
     }
 
+    @Test void mismatchedScopeClearsStaleCredentialsWithoutChangingTheLocalTarget() {
+        TokenStore follower = populatedStore();
+        TokenStore leader = new TokenStore();
+        leader.setTarget("other.example");
+        leader.applyCapturedResponseForUrl("https://other.example/",
+                List.of("session=other"), "other-token", null, Map.of());
+
+        assertThrows(IllegalArgumentException.class, () -> follower.fromJson(leader.toJson()));
+        assertEquals("first.example", follower.getTarget());
+        TokenStore.Snapshot after = follower.getSnapshotForUrl("https://first.example/");
+        assertEquals("", after.cookieString);
+        assertEquals("", after.jwt);
+        assertEquals("", after.csrfValue);
+        assertTrue(after.customHeaders.isEmpty());
+    }
+
+    @Test void mismatchedScopeClearsCredentialsEvenWhenThePayloadIsAlsoMalformed() {
+        TokenStore follower = populatedStore();
+        assertThrows(IllegalArgumentException.class, () -> follower.fromJson("""
+                {"target":"other.example","version":"2","jwt":null}
+                """));
+        assertEquals("", follower.getJwt());
+        assertEquals("", follower.getCookieString());
+    }
+
+    @Test void cookieBoundariesAndOrderingSurviveSharingAndDeletion() {
+        TokenStore leader = new TokenStore();
+        leader.setTarget("example.test");
+        leader.applyCapturedResponseForUrl("https://api.example.test/account/login",
+                List.of("sid=root; Path=/; Secure", ";", "sid=account; Secure",
+                        "team=shared; Domain=.example.test; Path=/"), null, null, Map.of());
+        TokenStore follower = new TokenStore();
+        follower.setTarget("example.test");
+        follower.fromJson(leader.toJson());
+
+        assertEquals("sid=account; sid=root; team=shared", follower.getCookieStringForUrl("https://api.example.test/account/me"));
+        assertEquals("sid=root; team=shared", follower.getCookieStringForUrl("https://api.example.test/accountant"));
+        assertEquals("team=shared", follower.getCookieStringForUrl("http://api.example.test/account/me"));
+        assertEquals("team=shared", follower.getCookieStringForUrl("https://other.example.test/account/me"));
+        leader.applyCapturedResponseForUrl("https://api.example.test/account/logout",
+                List.of("sid=; Max-Age=0"), null, null, Map.of());
+        follower.fromJson(leader.toJson());
+        assertEquals("sid=root; team=shared", follower.getCookieStringForUrl("https://api.example.test/account/me"));
+    }
+
+    @Test void expiredCookiesCannotBeImportedAndMissingSecureFlagCannotDowngradeACookie() {
+        TokenStore store = populatedStore();
+        JsonObject object = JsonParser.parseString(store.toJson()).getAsJsonObject();
+        JsonObject cookie = object.getAsJsonArray("cookies").get(0).getAsJsonObject();
+        cookie.remove("secure");
+        assertThrows(IllegalArgumentException.class, () -> store.fromJson(object.toString()));
+
+        cookie.addProperty("secure", true);
+        cookie.addProperty("expiresAt", 1);
+        store.fromJson(object.toString());
+        assertEquals("", store.getCookieString());
+    }
+
+    @Test void configuredSsoResponseKeepsHostOnlyCookiesAtTheIssuer() {
+        TokenStore store = new TokenStore();
+        store.setTarget("app.example");
+        assertTrue(store.applyLoginResponseForTarget("app.example", "https://idp.example/login",
+                List.of("idp_session=foo; Secure"), "app-access-token", null, Map.of()));
+        TokenStore.Snapshot destination = store.getSnapshotForUrl("https://app.example/");
+        assertEquals("", destination.cookieString);
+        assertEquals("app-access-token", destination.jwt);
+        assertFalse(store.toJson().contains("idp_session"));
+    }
+
     private static TokenStore populatedStore() {
         TokenStore store = new TokenStore();
         store.setTarget("first.example");
         store.setCsrfHeaderName("X-CSRF-Token");
         store.setWatchedHeaders(List.of("X-Device", "X-Session"));
-        store.applyCapturedResponse(Map.of("session", "cookie-one"), "jwt-one", "csrf-one",
+        store.applyCapturedResponseForUrl("https://first.example/", List.of("session=cookie-one"), "jwt-one", "csrf-one",
                 Map.of("X-Device", "device-one", "X-Session", "session-one"));
         return store;
     }

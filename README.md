@@ -1,198 +1,103 @@
-<div align="center">
-
 # Burp Session Relay
 
-**One application session. Your team's Burp instances.**
+Forward a domain, matching subdomains, or all outgoing HTTP(S) requests between two Burp instances, route TCP connections through a teammate's VPN, or share a test account's session. Each workflow can be used independently.
 
-Share authentication tokens, route selected traffic through a teammate's VPN, and keep a configured session current.
+## Install
 
-[![Release](https://img.shields.io/badge/release-v1.1-2563eb)](https://github.com/worldtreeboy/burp-session-relay/releases/latest)
-[![Java](https://img.shields.io/badge/Java-17%2B-e76f00)](#installation)
-[![Tests](https://img.shields.io/badge/local_tests-53_passing-238636)](#development)
-[![License](https://img.shields.io/badge/license-MIT-64748b)](LICENSE)
+**JAR location after building:** `build/libs/burp-session-relay.jar`
 
-[**Download the JAR**](https://github.com/worldtreeboy/burp-session-relay/releases/latest/download/burp-session-relay.jar) · [Quick start](#quick-start) · [VPN routing](#vpn-routing) · [Troubleshooting](#troubleshooting)
+From the repository root, use a Java 17 or 21 JDK and run the command for your platform.
 
-</div>
-
----
-
-Burp Session Relay is a Java extension for teams testing an application with a shared account. One teammate maintains the login as the **leader**; **followers** receive the latest session tokens in their own Burp instances.
-
-If the application is reachable only through the leader's VPN, the optional relay can also carry followers' target traffic through that machine.
-
-## At a glance
-
-| Feature | What it helps you do |
+| Platform | Build and test |
 | --- | --- |
-| **Session sharing** | Keep cookies, JWTs, CSRF tokens, and selected response headers synchronized across the team. |
-| **VPN routing** | Send selected domains through the leader's existing network route while intercepting traffic on the follower. |
-| **Session manager** | Use a configured login request to refresh tokens near JWT expiry or after a 401/403. Also works on its own. |
-| **Clear session status** | See connection state and stored token types, with token values hidden by default. |
+| Windows PowerShell | `.\gradlew.bat test shadowJar` |
+| macOS or Linux | `sh ./gradlew test shadowJar` |
 
-## A simpler interface
+On the sending machine, open **Extensions → Add** in Burp, select **Java**, and choose the JAR above. Reload the extension if replacing an older build. For Burp-to-Burp forwarding, the receiving machine only needs a running Burp HTTP proxy listener. For session sharing or the SOCKS relay, load the same extension build on both machines.
 
-Set **Target domains** once at the top, choose **Leader** or **Follower**, then open the tab for the task you need.
+## Burp to Burp
 
-![Session sharing interface in Burp Session Relay v1.1](docs/images/session-sharing.png)
+Use this path when you want the work laptop's Burp to receive proxied requests and show them in **Proxy → HTTP history**. A browser or mobile app already connected to the first Burp can keep its existing proxy settings.
 
-| Tab | What you configure |
-| --- | --- |
-| **Session sharing** | Leader or follower connection details and additional token headers |
-| **VPN routing** | The leader's relay or the follower's local SOCKS listener |
-| **Session manager** | A login request and automatic refresh settings |
-| **Tokens & status** | Current tokens, with an explicit option to reveal their values |
-
-<details>
-<summary><strong>Preview the VPN routing tab</strong></summary>
-
-![Follower VPN routing settings](docs/images/vpn-routing.png)
-
-</details>
-
-*Screenshots are rendered from the extension's Swing UI with example data. Appearance follows your Burp theme.*
-
-## Installation
-
-**Requires:** Java 17+ and a Burp Suite version with Montoya API support.
-
-1. Download [**burp-session-relay.jar**](https://github.com/worldtreeboy/burp-session-relay/releases/latest/download/burp-session-relay.jar) from the latest release.
-2. In Burp, open **Extensions → Add** and select **Java**.
-3. Choose the downloaded JAR. The **Burp Session Relay** tab appears.
-
-**Upgrading?** Reload the extension after replacing the JAR. Version 1.1 removes JWT security findings from Burp's Issues integration. Previously saved findings remain in your project; session-manager JWT expiry checks still work.
-
-## Quick start
-
-### 1. Choose the target domains
-
-Enter the application's domains at the top of the tab, for example:
+With session sharing and automatic refresh off, the extension passes the original request to Burp unchanged. The forwarding rule lives in the sending Burp's project settings. It adds no ID, header, or query parameter to the request. Burp itself can reserialize traffic between hops when converting HTTP versions.
 
 ```text
-example.com, *.internal.test
+Client → this machine's Burp → work laptop's Burp HTTP listener → destination
 ```
 
-Domain entries include their subdomains. All listed domains use **one shared token pool**, so keep unrelated sites and accounts in separate Burp instances. Changing target domains clears stored tokens.
+1. **On the work laptop**, open **Settings → Tools → Proxy → Proxy listeners**. Choose a listening address and port reachable from the first machine over a protected connection. The laptop must be able to reach the API. If using SSH port forwarding, the laptop's listener can stay on `127.0.0.1:8080`.
+2. **On this machine**, open **Burp to Burp** in the default follower role. Under **Destination pattern**, enter one of the values below. Set **Receiving Burp host** and **HTTP listener port** to the work Burp listener or your local forwarded endpoint, then click **Apply to this project**. Applying again updates the same first-priority upstream rule.
 
-### 2. Start the leader
+   | Destination pattern | Requests sent to the receiving Burp |
+   | --- | --- |
+   | `example.com` | That hostname on any path or port |
+   | `*.example.com` | Subdomains such as `www.example.com` and `api.example.com` |
+   | `*` | All outgoing HTTP(S) destinations handled by this Burp project, including traffic from clients already connected to it |
 
-1. Select **Leader** and open **Session sharing**.
-2. Enter a **Shared password** and choose the **Token-sharing port** (default `8888`).
-3. If your application needs them, open **Additional token headers** to configure CSRF and other response headers.
-4. Click **Start sharing**, then log in to the application through the leader's Burp instance.
+3. Send one ordinary request to a matching destination. Check its method, path, and status in **Proxy → HTTP history** on both machines. If a request is paused in either instance, forward it or turn interception off for this check. For HTTPS inspection in both histories, the first Burp must accept the work Burp's certificate. If upstream TLS verification is enabled, trust the work Burp CA in the first Burp's server-certificate settings.
+4. Click **Remove forwarding** when you want to stop. Unloading the extension on its own leaves the saved upstream rule active. You can also manage it under **Settings → Network → Connections → Upstream proxy servers**. If you previously used VPN routing, check Burp's SOCKS setting, which also applies to upstream proxy connections.
 
-Captured tokens appear under **Tokens & status**.
+![Burp to Burp forwarding setup](docs/images/burp-to-burp.png)
 
-### 3. Connect a follower
+For example, with authorized SSH access to the work laptop, this command on the first machine forwards its port `18080` to the work Burp's loopback listener. Set the upstream rule to `127.0.0.1:18080`. Using a separate local port keeps the app's existing `8080` listener available.
 
-1. Select **Follower** and use the same target domains.
-2. Enter the leader's reachable hostname or IP address, token-sharing port, and shared password.
-3. Click **Connect to leader**.
+```sh
+ssh -N -L 127.0.0.1:18080:127.0.0.1:8080 user@work-laptop
+```
 
-The status shows when tokens have actually been received. Followers check for updates every **5 seconds** by default and apply them to requests for the configured domains.
-
-> **Need access through the leader's VPN?** Complete the routing setup below as well. The token-sharing connection carries authentication data; website traffic uses a separate SOCKS connection.
+Burp uses the first matching upstream rule. Other project rules remain below the forwarding rule. If the project inherits upstream rules containing authentication, use **Manual setup and HTTPS → Open Burp settings** to configure forwarding directly. This keeps inherited credentials in user settings. The destination pattern is independent of session-sharing target domains. [PortSwigger connection settings](https://portswigger.net/burp/documentation/desktop/settings/network/connections)
 
 ## VPN routing
 
-The leader must already be connected to a VPN that can reach the target website. The extension uses the leader's operating system routes and DNS; it does not establish a VPN.
+Choose **VPN routing** when the work laptop should open connections directly to the API using its operating system routes and DNS. Interception stays in the follower's Burp. The leader needs working access to the API through its VPN.
 
-```mermaid
-flowchart LR
-    B["Follower Burp"] --> L["Local SOCKS<br/>127.0.0.1:1081"]
-    L -->|Target domains| R["Leader SOCKS<br/>port 1080"]
-    R --> V["Leader's VPN route"]
-    V --> T["Private website"]
-    L -->|Other domains| D["Direct from follower"]
-```
+| Port by default | Service |
+| --- | --- |
+| `1080` | Leader's authenticated SOCKS relay |
+| `1081` | Follower's local SOCKS listener on `127.0.0.1` |
+| `8888` | Optional leader token-sharing service |
 
-### On the leader
+1. On the leader, enter the **Target domains**, choose **VPN routing**, set a **Relay password**, and click **Start relay**. This starts routing independently of session sharing.
+2. The leader listens on loopback by default. Use an encrypted port forward to the leader or select **Allow connections from other devices** for direct access over a protected network. That option binds the service on all interfaces. SOCKS authentication and the token-sharing protocol have no built-in transport encryption.
+3. On the follower's **VPN routing** tab, enter the same target domains, the leader address or forwarded endpoint, the relay port and the relay password. Choose an available **Local SOCKS port** and click **Start local routing**.
+4. In the follower's Burp, select **Settings → Network → Connections → Use SOCKS proxy**. Set the proxy to `127.0.0.1:1081` (or your local port), leave local authentication empty and enable **Do DNS lookups over SOCKS proxy**. A successful listener start means that the local port is ready. Send an in-scope request to verify the full route.
+5. Disable Burp's SOCKS setting when stopping the local listener.
 
-In **VPN routing**, select **Enable VPN relay when sharing starts** and choose a **VPN relay port** (default `1080`). Then click **Start sharing**.
+Matching hostnames go through the leader. Unlisted hostnames go directly from the follower. Unlisted IP addresses are blocked by default because the original hostname may have been resolved before reaching the relay. **Allow direct connections to unlisted IP addresses** opts into direct IP routing. The relay supports TCP. UDP and QUIC require a different transport.
 
-The relay starts and stops with sharing. It uses the same password and target domains. Stop sharing before changing these settings.
+![Follower VPN routing settings](docs/images/vpn-routing.png)
 
-### On the follower
+## Session sharing
 
-1. Enter the leader address and shared password in **Session sharing**.
-2. In **VPN routing**, set **Leader VPN relay port** to the leader's relay port.
-3. Choose a free **Local SOCKS port** (default `1081`) and click **Start local routing**.
-4. In Burp's network settings, configure SOCKS5 with host `127.0.0.1` and the selected local port.
-5. Leave authentication empty for this local connection and enable hostname/DNS resolution through SOCKS.
+Use named targets belonging to the same application session, such as `app.example.test, api.example.test`. Domain entries include subdomains. The standalone `*` is reserved for routing. Non-cookie credentials such as bearer tokens and configured headers are shared across the agreed target list.
 
-Starting the local listener does not change Burp's network settings or verify website connectivity. The leader's relay port must be reachable, and the VPN must permit the Java process to use its route.
+1. On the leader's **Session sharing** tab, set the token-sharing port and **Token password**. Use a different password from the relay. Under **Additional token headers**, configure any CSRF or custom response header names your application needs. Click **Start sharing** and log in through the leader's Burp.
+2. On the follower, set the same target list. Enter the leader's address, token-sharing port and token password under **Session sharing**. Click **Connect to leader**. The follower polls every five seconds by default.
+3. Check **Tokens & status** for captured token types. Values are masked by default. A successful fetch can contain an empty session if the leader has not logged in yet.
 
-### Which port goes where?
+Cookies retain their host/domain, path, Secure flag and expiry. Older snapshots without the information needed for safe replay are refused. A mismatched target list prevents token import. Keep the transport between teammates encrypted, including when using separate relay and token passwords.
 
-| Setting | Default | Purpose |
-| --- | --- | --- |
-| Leader token-sharing port | `8888` | Followers fetch session tokens |
-| Leader VPN relay port | `1080` | The leader forwards target website traffic |
-| Follower local SOCKS port | `1081` | Burp connects to `127.0.0.1` on the follower |
-
-**Phone testing:** point the phone's HTTP/HTTPS proxy at the follower's Burp listener. Interception stays on the follower.
-
-**Stopping routing:** disable or change Burp's SOCKS setting when you stop the local listener, so Burp does not keep sending traffic to a stopped service.
+![Session sharing settings](docs/images/session-sharing.png)
 
 ## Session manager
 
-This optional feature works alongside team sharing or on its own.
+Set named target domains and open **Session manager**. Configure the login URL, method, content type, body and extra headers. **Test login request** sends one real request and updates the token store. Enable automatic refresh after verifying the result.
 
-1. Set the target domains and open **Session manager**.
-2. Enter the login URL, HTTP method, content type, request body, and any extra headers.
-3. Click **Test login request** to send one request and inspect the token update.
-4. Enable **automatic session refresh** when the configuration is ready.
-
-JWT expiry is checked before outgoing requests with a default **30-second buffer**. An in-scope 401/403 triggers a background refresh for subsequent requests. The failed request is not retried, and refresh attempts remain limited to one per five seconds.
-
-The configuration represents one HTTP request. Multi-step login flows, interactive MFA, and redirects may need additional handling outside this extension. Receiving tokens does not by itself prove that a protected request will be authorized.
+The manager checks JWT expiry with a default 30-second buffer. An in-scope 401 or 403 can trigger a background login to refresh subsequent requests. The original request is returned to its caller. This feature supports single-request logins and can run independently of team sharing.
 
 ## Troubleshooting
 
-| What you see | What to check |
+| Symptom | Check |
 | --- | --- |
-| Waiting for the first token response | Leader address, token-sharing port, listener state, and local firewall |
-| Authentication error | The shared password must match on both instances |
-| Tokens arrive, but the private website is unreachable | Enable the separate VPN relay and configure Burp's local SOCKS connection |
-| A hostname fails through the relay | Enable DNS through SOCKS and check both instances' target domains |
-| Burp loses connectivity after routing stops | Disable or update Burp's SOCKS proxy setting |
-| Role or target fields are disabled | Stop active sharing, routing, and session refresh first |
-
-## Security and scope
-
-- **Use a trusted network.** Token sharing uses plain HTTP; the shared secret and SOCKS authentication are not encrypted. These listeners are not designed to be exposed to the public internet.
-- **Keep the target list specific.** Token injection and routing share the same scope. Setting `*` applies tokens to every hostname as well as routing every destination.
-- **One pool represents one session.** Cookies are stored without browser-style domain/path isolation. Use separate Burp instances for independent sites, accounts, or sessions.
-- **Token values are hidden by default.** Reveal them only when you need to inspect them.
-
-Token responses disable caching, token fetches refuse redirects, and the leader relay requires authentication and enforces the configured target scope.
+| Only the first Burp sees the API call | Check the upstream destination hostname and rule order, the work Burp's HTTP listener port, and whether either instance is paused at Intercept. A successful SOCKS relay alone sends traffic straight from the leader to the API. |
+| The work Burp sees a request but the API fails | Check the work laptop's API DNS, VPN route, TLS trust and upstream rules. Avoid pointing the work Burp back at the first Burp. |
+| SOCKS rejects an unlisted IP | Enable DNS through SOCKS or explicitly include the intended numeric target. |
+| The follower cannot connect to the leader | Check the service's bind address, encrypted connection or port forward, listener port and corresponding password. |
+| Token sync reports incompatible targets or format | Use the current build on both instances and configure the same target domains before reconnecting. |
+| Burp loses connectivity after stopping local routing | Disable the SOCKS setting or point it to a running listener. |
 
 ## Development
 
-Build and run the tests on Windows:
+The Gradle test suite covers token state, cookie handling, UI controls, and forwarding over real loopback sockets. Run `test shadowJar` to test and build the Java extension. The output is `build/libs/burp-session-relay.jar`.
 
-```powershell
-.\gradlew.bat clean test shadowJar
-```
-
-On macOS or Linux:
-
-```bash
-./gradlew clean test shadowJar
-```
-
-The extension JAR is written to `build/libs/burp-session-relay.jar`.
-
-**v1.1 validation:** 53 tests pass, covering token state, input validation, cookie handling, UI defaults, and local token-sharing/SOCKS forwarding. The routing tests use a loopback HTTP fixture. They do not verify a real VPN, LAN firewall, or a particular site's login behavior.
-
-### What's changed in v1.1
-
-- Reorganized the UI into four focused tabs with shared target settings and clearer status.
-- Added input validation and masked token values.
-- Fixed stale credentials, scope handling, removed headers, and cookie expiry precedence.
-- Hardened token imports, redirect handling, and relay connection cleanup.
-- Removed the JWT security findings feature; session-manager expiry checks remain.
-
-## License
-
-[MIT](LICENSE) · Copyright © 2026 worldtreeboy
+[MIT license](LICENSE)
