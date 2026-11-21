@@ -30,7 +30,7 @@ import javax.swing.SwingUtilities;
  */
 public class SessionShareExtension implements BurpExtension {
 
-    private static final String VERSION = "1.2-dev";
+    private static final String VERSION = "1.2";
 
     private TokenStore tokenStore;
     private TokenServer tokenServer;
