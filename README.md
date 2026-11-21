@@ -4,7 +4,7 @@ Forward a domain, matching subdomains, or all outgoing HTTP(S) requests between 
 
 ## Install
 
-**[Download Burp Session Relay v1.2 (JAR)](https://github.com/worldtreeboy/burp-session-relay/releases/download/v1.2/burp-session-relay.jar)** · [Release notes](https://github.com/worldtreeboy/burp-session-relay/releases/tag/v1.2)
+**[Download Burp Session Relay v1.2.1 (JAR)](https://github.com/worldtreeboy/burp-session-relay/releases/download/v1.2.1/burp-session-relay.jar)** · [Release notes](https://github.com/worldtreeboy/burp-session-relay/releases/tag/v1.2.1)
 
 On the sending machine, open **Extensions → Add** in Burp, select **Java**, and choose the downloaded JAR. Reload the extension if replacing an older build. For Burp-to-Burp forwarding, the receiving machine only needs a running Burp HTTP proxy listener. For session sharing or the SOCKS relay, load the same extension build on both machines.
 

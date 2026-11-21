@@ -16,6 +16,7 @@ import java.lang.reflect.Proxy;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -55,6 +56,60 @@ class UpstreamProxyRulesTest {
         assertEquals(existing, servers.get(1));
         UpstreamProxyRules.remove(burp.api);
         assertEquals(List.of(existing), burp.project.getAsJsonArray("servers").asList());
+    }
+
+    @Test void applyingUpdatingAndRemovingWorksWhenBurpOmitsDefaultAuthentication() {
+        Fixture burp = new Fixture(false);
+        JsonObject dormant = rule("old.example.test", "previous.test", 9100);
+        dormant.remove("auth_type");
+        burp.project.getAsJsonArray("servers").add(dormant);
+        JsonObject original = burp.project.deepCopy();
+        JsonObject fallback = rule("*", "fallback.test", 9000);
+        burp.user.getAsJsonArray("servers").add(fallback);
+        burp.onImport = options -> options.getAsJsonArray("servers").forEach(element -> {
+            JsonObject server = element.getAsJsonObject();
+            if (server.has("auth_type") && server.get("auth_type").getAsString().equals("none")) {
+                server.remove("auth_type");
+            }
+        });
+
+        UpstreamProxyRules.apply(burp.api, "*.example.test", "first.test", 8080);
+        assertTrue(UpstreamProxyRules.current(burp.api).contains("first.test:8080"));
+        UpstreamProxyRules.apply(burp.api, "*", "second.test", 8081);
+        JsonArray servers = burp.project.getAsJsonArray("servers");
+        assertEquals(2, servers.size());
+        assertFalse(servers.get(0).getAsJsonObject().has("auth_type"));
+        assertEquals("fallback.test", servers.get(1).getAsJsonObject().get("proxy_host").getAsString());
+        assertTrue(UpstreamProxyRules.current(burp.api).contains("second.test:8081"));
+
+        UpstreamProxyRules.remove(burp.api);
+        assertEquals(original, burp.project);
+        assertEquals(List.of(fallback), burp.user.getAsJsonArray("servers").asList());
+        assertTrue(UpstreamProxyRules.current(burp.api).isEmpty());
+    }
+
+    @Test void verificationReportsChangedPortOrAuthenticationAndRestoresPriorSettings() {
+        for (String field : List.of("proxy_port", "auth_type")) {
+            Fixture burp = new Fixture(true);
+            JsonObject existing = rule("existing.test", "prior-proxy.test", 8755);
+            burp.project.getAsJsonArray("servers").add(existing);
+            JsonObject original = burp.project.deepCopy();
+            burp.onImport = options -> {
+                JsonObject first = options.getAsJsonArray("servers").get(0).getAsJsonObject();
+                if (!first.has("description")) return;
+                if (field.equals("proxy_port")) first.addProperty(field, 9192);
+                else first.addProperty(field, "basic");
+            };
+
+            IllegalStateException error = assertThrows(IllegalStateException.class,
+                    () -> UpstreamProxyRules.apply(burp.api, "target.test", "private-proxy.test", 8989));
+            assertTrue(error.getMessage().contains(field), error::getMessage);
+            for (String value : List.of("private-proxy.test", "prior-proxy.test", "target.test", "8989", "9192", "basic")) {
+                assertFalse(error.getMessage().contains(value), error::getMessage);
+            }
+            assertEquals(original, burp.project);
+            assertTrue(UpstreamProxyRules.current(burp.api).isEmpty());
+        }
     }
 
     @Test void preservesInheritedFallbacksAndRestoresOriginalProjectSettings() {
@@ -141,6 +196,7 @@ class UpstreamProxyRulesTest {
         final Map<String, String> extensionData = new HashMap<>();
         final MontoyaApi api;
         int importCount;
+        Consumer<JsonObject> onImport = options -> {};
 
         Fixture(boolean projectOverride) {
             project.addProperty("use_user_options", !projectOverride);
@@ -153,6 +209,7 @@ class UpstreamProxyRulesTest {
                     JsonObject doc = JsonParser.parseString((String) args[0]).getAsJsonObject();
                     project = doc.getAsJsonObject("project_options").getAsJsonObject("connections")
                             .getAsJsonObject("upstream_proxy");
+                    onImport.accept(project);
                     importCount++;
                     yield null;
                 }

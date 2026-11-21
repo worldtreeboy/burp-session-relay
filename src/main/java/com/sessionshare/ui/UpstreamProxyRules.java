@@ -170,38 +170,52 @@ final class UpstreamProxyRules {
         return others;
     }
 
-    /** Burp may add defaults to new rules when serializing them. Check every field we supplied. */
-    private static boolean matches(JsonObject actual, JsonObject expected) {
-        if (usesUser(actual) != usesUser(expected)) return false;
+    /** Compare the exported settings without including addresses or credentials in diagnostics. */
+    private static String difference(JsonObject actual, JsonObject expected) {
+        if (usesUser(actual) != usesUser(expected)) return "The project override (use_user_options) differs.";
         JsonArray a = servers(actual), e = servers(expected);
-        if (a.size() != e.size()) return false;
+        if (a.size() != e.size()) return "Burp returned a different number of upstream rules.";
         for (int i = 0; i < e.size(); i++) {
-            var fields = e.get(i).getAsJsonObject().entrySet();
+            JsonObject wanted = e.get(i).getAsJsonObject();
             JsonObject received = a.get(i).getAsJsonObject();
-            for (var field : fields) {
-                if (!field.getValue().equals(received.get(field.getKey()))) return false;
+            String prefix = "Upstream rule " + (i + 1) + " differs in ";
+            // The desktop exporter can omit the default authentication mode for an unauthenticated proxy.
+            if (!authenticationMode(wanted).equalsIgnoreCase(authenticationMode(received))) {
+                return prefix + "auth_type.";
+            }
+            for (var field : wanted.entrySet()) {
+                if (!field.getKey().equals("auth_type") && !field.getValue().equals(received.get(field.getKey()))) {
+                    return prefix + field.getKey() + ".";
+                }
             }
         }
-        return true;
+        return "";
+    }
+
+    private static String authenticationMode(JsonObject rule) {
+        return rule.has("auth_type") ? rule.get("auth_type").getAsString() : "none";
     }
 
     private static JsonObject writeVerified(MontoyaApi api, JsonObject previous, JsonObject next) {
         // Re-read before replacing the ordered list so edits made since opening the form survive.
         if (!project(api).equals(previous)) throw new IllegalStateException("Upstream settings changed. Refresh and try again.");
+        String detail;
         try {
             write(api, next);
             JsonObject accepted = project(api);
-            if (matches(accepted, next)) return accepted;
+            detail = difference(accepted, next);
+            if (detail.isEmpty()) return accepted;
         } catch (RuntimeException e) {
             // Montoya imports can also fail after applying part of a configuration.
+            detail = "Burp's settings API raised " + e.getClass().getSimpleName() + ".";
         }
         try {
             write(api, previous);
-            if (!matches(project(api), previous)) throw new IllegalStateException();
+            if (!difference(project(api), previous).isEmpty()) throw new IllegalStateException();
         } catch (RuntimeException e) {
-            throw new IllegalStateException("Burp could not confirm the update or restore the previous rules. Check upstream proxy settings.");
+            throw new IllegalStateException(detail + " Restore could not be verified. Check Burp's upstream proxy settings.");
         }
-        throw new IllegalStateException("Burp did not accept the update. The previous upstream settings were restored.");
+        throw new IllegalStateException(detail + " The previous upstream settings were restored.");
     }
 
     private static void write(MontoyaApi api, JsonObject options) {
