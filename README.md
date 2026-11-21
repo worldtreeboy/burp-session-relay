@@ -25,6 +25,8 @@ With session sharing and automatic refresh off, the extension passes the origina
 Client → this machine's Burp → work laptop's Burp HTTP listener → destination
 ```
 
+![Burp to Burp with the wildcard rule applied, forwarding all destinations to work-laptop.example.test on port 8080](docs/images/v1.2/burp-to-burp-forwarding.png)
+
 1. **On the work laptop**, open **Settings → Tools → Proxy → Proxy listeners**. Choose a listening address and port reachable from the first machine over a protected connection. The receiving Burp connects to the destination using the laptop’s network routes and DNS, including its VPN when connected. If using SSH port forwarding, the laptop's listener can stay on `127.0.0.1:8080`.
 2. **On this machine**, open **Burp to Burp** in the default follower role. Under **Destination pattern**, enter one of the values below. Set **Receiving Burp host** and **HTTP listener port** to the work Burp listener or your local forwarded endpoint, then click **Apply to this project**. Applying again updates the same first-priority upstream rule.
 
@@ -36,8 +38,6 @@ Client → this machine's Burp → work laptop's Burp HTTP listener → destinat
 
 3. Send one ordinary request to a matching destination. Check its method, path, and status in **Proxy → HTTP history** on both machines. If a request is paused in either instance, forward it or turn interception off for this check. For HTTPS inspection in both histories, the first Burp must accept the work Burp's certificate. If upstream TLS verification is enabled, trust the work Burp CA in the first Burp's server-certificate settings.
 4. Click **Remove forwarding** when you want to stop. Unloading the extension on its own leaves the saved upstream rule active. You can also manage it under **Settings → Network → Connections → Upstream proxy servers**.
-
-![Burp to Burp forwarding setup](docs/images/burp-to-burp.png)
 
 For example, with authorized SSH access to the work laptop, this command on the first machine forwards its port `18080` to the work Burp's loopback listener. Set the upstream rule to `127.0.0.1:18080`. Using a separate local port keeps the app's existing `8080` listener available.
 
@@ -59,7 +59,7 @@ Use named targets belonging to the same application session, such as `app.exampl
 
 Cookies retain their host/domain, path, Secure flag and expiry. Older snapshots without the information needed for safe replay are refused. A mismatched target list prevents token import. The leader’s token service listens on loopback by default. Its plain HTTP protocol carries the follower’s password and the leader’s session tokens. Use an encrypted port forward, or select **Allow connections from other devices** to listen on all interfaces when both machines communicate over a protected network.
 
-![Session sharing settings](docs/images/session-sharing.png)
+![Session sharing in the leader role with two example target domains, port 8888, and a masked token password](docs/images/v1.2/leader-session-sharing.png)
 
 ## Session manager
 
